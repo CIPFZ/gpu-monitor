@@ -1,0 +1,16 @@
+[package]
+name = "gpu-monitor-core"
+version.workspace = true
+edition.workspace = true
+description = "Core library for GPU monitoring - NVML bindings and data models"
+
+[dependencies]
+nvml-wrapper = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tokio-test = "0.4"

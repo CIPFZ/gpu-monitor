@@ -1,0 +1,35 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/gpu-monitor-core",
+    "crates/gpu-monitor-cli",
+    "crates/gpu-monitor-gui",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+authors = ["Your Name"]
+license = "MIT"
+repository = "https://github.com/yourusername/gpu-monitor"
+
+[workspace.dependencies]
+# Shared dependencies
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+thiserror = "1.0"
+tokio = { version = "1.0", features = ["full"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# NVIDIA ML
+nvml-wrapper = "0.10"
+
+# CLI specific
+ratatui = "0.29"
+crossterm = "0.28"
+clap = { version = "4.0", features = ["derive"] }
+
+# Tauri
+tauri = "2.0"
+tauri-build = "2.0"

@@ -1,0 +1,89 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+jobs:
+  build-cli:
+    name: Build CLI
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libnvidia-ml-dev
+
+      - name: Build CLI
+        run: cargo build --release --bin gpu-monitor
+
+      - name: Upload CLI Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: gpu-monitor-cli
+          path: target/release/gpu-monitor
+
+  build-gui:
+    name: Build GUI (.deb)
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install System Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential curl wget file libssl-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev
+
+      - name: Install Frontend Dependencies
+        working-directory: crates/gpu-monitor-gui/src-web
+        run: npm install
+
+      - name: Install Tauri CLI
+        run: cargo install tauri-cli --version "^2.0.0" --locked
+
+      - name: Build Tauri App
+        working-directory: crates/gpu-monitor-gui
+        run: cargo tauri build
+
+      - name: Upload GUI Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: gpu-monitor-gui-deb
+          path: crates/gpu-monitor-gui/target/release/bundle/deb/*.deb
+
+  publish-release:
+    name: Publish Release
+    needs: [build-cli, build-gui]
+    runs-on: ubuntu-22.04
+    if: startsWith(github.ref, 'refs/tags/')
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: |
+            artifacts/gpu-monitor-cli/gpu-monitor
+            artifacts/gpu-monitor-gui-deb/**/*.deb
+          draft: false
+          prerelease: false
+          generate_release_notes: true

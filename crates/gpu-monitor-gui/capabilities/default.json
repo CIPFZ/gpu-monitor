@@ -1,0 +1,12 @@
+{
+  "identifier": "default",
+  "description": "Default permissions for the app",
+  "local": true,
+  "windows": ["*"],
+  "permissions": [
+    "core:default",
+    "core:window:default",
+    "core:event:default",
+    "core:tray:default"
+  ]
+}

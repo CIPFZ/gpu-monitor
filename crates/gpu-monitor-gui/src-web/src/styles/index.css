@@ -1,0 +1,679 @@
+/* GPU Monitor - macOS-Inspired Minimalist Design */
+
+:root {
+  /* macOS Light/Dark neutral palette */
+  --bg-app: #f5f5f7;
+  --bg-card: #ffffff;
+  --bg-sidebar: #eef0f2;
+  --bg-modal-overlay: rgba(0, 0, 0, 0.4);
+
+  /* Text colors */
+  --text-primary: #1d1d1f;
+  --text-secondary: #86868b;
+  --text-tertiary: #d2d2d7;
+  
+  /* Accent colors (Apple-style) */
+  --accent-blue: #0071e3;
+  --accent-green: #34c759;
+  --accent-orange: #ff9500;
+  --accent-red: #ff3b30;
+  --accent-purple: #af52de;
+  --accent-gray: #8e8e93;
+  
+  /* Borders & Shadows */
+  --border-light: rgba(0, 0, 0, 0.05);
+  --shadow-sm: 0 2px 8px rgba(0, 0, 0, 0.04);
+  --shadow-md: 0 8px 24px rgba(0, 0, 0, 0.08);
+  --shadow-lg: 0 20px 40px rgba(0, 0, 0, 0.15);
+
+  /* Layout */
+  --radius-lg: 16px;
+  --radius-md: 10px;
+  --radius-sm: 6px;
+  
+  /* Spacing */
+  --spacing-xs: 4px;
+  --spacing-sm: 8px;
+  --spacing-md: 16px;
+  --spacing-lg: 24px;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg-app: #1c1c1e;
+    --bg-card: #2c2c2e;
+    --bg-sidebar: #242426;
+    --bg-modal-overlay: rgba(0, 0, 0, 0.6);
+
+    --text-primary: #f5f5f7;
+    --text-secondary: #86868b;
+    --text-tertiary: #48484a;
+
+    --border-light: rgba(255, 255, 255, 0.1);
+    --shadow-sm: 0 2px 8px rgba(0, 0, 0, 0.2);
+    --shadow-md: 0 8px 24px rgba(0, 0, 0, 0.4);
+    --shadow-lg: 0 20px 40px rgba(0, 0, 0, 0.6);
+  }
+}
+
+/* Reset & Base */
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", sans-serif;
+  background-color: var(--bg-app);
+  color: var(--text-primary);
+  -webkit-font-smoothing: antialiased;
+  height: 100vh;
+  overflow: hidden;
+  font-size: 13px;
+}
+
+#root {
+  height: 100%;
+}
+
+/* App Layout */
+.app-container {
+  max-width: 1600px;
+  margin: 0 auto;
+  height: 100%;
+  padding: var(--spacing-lg);
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-lg);
+}
+
+/* Header */
+.app-header {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-md);
+  padding-bottom: var(--spacing-md);
+  flex-shrink: 0;
+}
+
+.app-icon {
+  width: 32px;
+  height: 32px;
+  background: linear-gradient(135deg, var(--accent-green), var(--accent-blue));
+  border-radius: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: white;
+  font-weight: bold;
+  font-size: 18px;
+  box-shadow: var(--shadow-sm);
+}
+
+.header-content {
+  flex: 1;
+}
+
+.app-title {
+  font-size: 18px;
+  font-weight: 600;
+  letter-spacing: -0.5px;
+  color: var(--text-primary);
+}
+
+.app-subtitle {
+  font-size: 12px;
+  color: var(--text-secondary);
+  margin-top: 2px;
+}
+
+/* Header Controls */
+.header-controls {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-md);
+}
+
+.gpu-search {
+  position: relative;
+}
+
+.gpu-search input {
+  background: var(--bg-card);
+  border: 1px solid var(--border-light);
+  padding: 6px 12px 6px 32px;
+  border-radius: 20px;
+  font-size: 12px;
+  color: var(--text-primary);
+  width: 200px;
+  outline: none;
+  transition: all 0.2s;
+  box-shadow: var(--shadow-sm);
+}
+
+.gpu-search input:focus {
+  border-color: var(--accent-blue);
+  box-shadow: 0 0 0 3px rgba(0, 113, 227, 0.1);
+  width: 240px;
+}
+
+.search-icon {
+  position: absolute;
+  left: 10px;
+  top: 50%;
+  transform: translateY(-50%);
+  color: var(--text-secondary);
+  pointer-events: none;
+}
+
+.status-badge {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  background: rgba(52, 199, 89, 0.1);
+  border-radius: 20px;
+  color: var(--accent-green);
+  font-weight: 500;
+  font-size: 11px;
+  border: 1px solid rgba(52, 199, 89, 0.2);
+}
+
+.status-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+  box-shadow: 0 0 8px currentColor;
+}
+
+/* Multi-GPU Layout */
+.gpu-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+  gap: var(--spacing-md);
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding-bottom: var(--spacing-lg);
+  align-content: start;
+  padding-right: 4px;
+}
+
+/* GPU Card (Compact) */
+.gpu-card {
+  background: var(--bg-card);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-sm);
+  padding: var(--spacing-md);
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-md);
+  border: 1px solid var(--border-light);
+  transition: transform 0.2s ease, box-shadow 0.2s ease;
+  height: auto;
+}
+
+.gpu-card:hover {
+  transform: translateY(-2px);
+  box-shadow: var(--shadow-md);
+}
+
+.gpu-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  margin-bottom: 0;
+}
+
+.gpu-name {
+  font-size: 14px;
+  font-weight: 600;
+  margin-bottom: 2px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 200px;
+}
+
+.gpu-meta {
+  color: var(--text-secondary);
+  font-size: 10px;
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+
+.gpu-index {
+  background: var(--bg-app);
+  color: var(--text-secondary);
+  padding: 1px 5px;
+  border-radius: 4px;
+  font-size: 9px;
+  font-weight: 600;
+  text-transform: uppercase;
+}
+
+/* Compact Metrics Layout */
+.compact-metrics {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.metric-row {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-md);
+}
+
+.metric-info {
+  width: 70px;
+  flex-shrink: 0;
+}
+
+.metric-label {
+  font-size: 10px;
+  color: var(--text-secondary);
+  margin-bottom: 1px;
+}
+
+.metric-value-large {
+  font-size: 18px;
+  font-weight: 600;
+  font-feature-settings: "tnum";
+}
+
+.metric-unit-small {
+  font-size: 11px;
+  color: var(--text-secondary);
+  font-weight: 400;
+  margin-left: 2px;
+}
+
+.metric-chart {
+  flex: 1;
+  height: 32px;
+}
+
+/* Secondary Metrics Row */
+.secondary-metrics {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: var(--spacing-xs);
+  padding-top: var(--spacing-sm);
+  border-top: 1px solid var(--border-light);
+}
+
+.mini-metric {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+}
+
+.mini-label {
+  font-size: 9px;
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  margin-bottom: 1px;
+}
+
+.mini-value {
+  font-size: 12px;
+  font-weight: 600;
+}
+
+/* Action Button */
+.card-action {
+  margin-top: 0;
+}
+
+.btn-details {
+  width: 100%;
+  padding: 6px;
+  background: var(--bg-app);
+  border: 1px solid transparent;
+  border-radius: var(--radius-md);
+  color: var(--accent-blue);
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.btn-details:hover {
+  background: rgba(0, 113, 227, 0.1);
+}
+
+/* --- Expanded Mode Styles (Single GPU) --- */
+.gpu-expanded-container {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto; /* Enable scrolling for the whole container */
+  padding-right: 4px; /* Space for scrollbar */
+}
+
+.gpu-expanded {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-lg);
+  min-height: 100%; /* Ensure it takes full height */
+  padding-bottom: var(--spacing-lg); /* Bottom padding */
+}
+
+.expanded-header {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-xs);
+  flex-shrink: 0;
+}
+
+.gpu-name-large {
+  font-size: 24px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.gpu-meta-large {
+  display: flex;
+  gap: var(--spacing-sm);
+  flex-wrap: wrap;
+}
+
+.meta-tag {
+  background: var(--bg-card);
+  border: 1px solid var(--border-light);
+  padding: 4px 10px;
+  border-radius: 20px;
+  font-size: 12px;
+  color: var(--text-secondary);
+  font-weight: 500;
+}
+
+.expanded-metrics-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--spacing-lg);
+  flex-shrink: 0;
+}
+
+.expanded-metric-card {
+  background: var(--bg-card);
+  border-radius: var(--radius-lg);
+  padding: var(--spacing-lg);
+  border: 1px solid var(--border-light);
+  box-shadow: var(--shadow-sm);
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-md);
+}
+
+.metric-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+}
+
+.metric-label-large {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  text-transform: uppercase;
+}
+
+.metric-value-xl {
+  font-size: 32px;
+  font-weight: 600;
+  font-feature-settings: "tnum";
+}
+
+.metric-unit-large {
+  font-size: 16px;
+  color: var(--text-secondary);
+  margin-left: 4px;
+}
+
+.chart-container-large {
+  flex: 1;
+  min-height: 120px;
+}
+
+.secondary-metrics-row {
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+  gap: var(--spacing-md);
+  flex-shrink: 0;
+}
+
+.stat-box {
+  background: var(--bg-card);
+  border-radius: var(--radius-md);
+  padding: var(--spacing-md);
+  border: 1px solid var(--border-light);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  gap: 4px;
+}
+
+.stat-label {
+  font-size: 11px;
+  color: var(--text-secondary);
+  text-transform: uppercase;
+}
+
+.stat-value {
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.expanded-process-section {
+  flex: 1;
+  background: var(--bg-card);
+  border-radius: var(--radius-lg);
+  border: 1px solid var(--border-light);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  min-height: 400px; /* Ensure minimum height for process list */
+}
+
+.process-toolbar {
+  padding: var(--spacing-md) var(--spacing-lg);
+  border-bottom: 1px solid var(--border-light);
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex-shrink: 0;
+}
+
+.section-title-large {
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.expanded-table-wrapper {
+  flex: 1;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+.expanded-table-wrapper .table-container {
+  border: none;
+  border-radius: 0;
+}
+
+/* Modal (unchanged mostly) */
+.modal-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: var(--bg-modal-overlay);
+  backdrop-filter: blur(4px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+  animation: fadeIn 0.2s ease;
+}
+
+.modal-content {
+  background: var(--bg-card);
+  width: 90%;
+  max-width: 800px;
+  height: 80%;
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-lg);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  animation: slideUp 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.modal-header {
+  padding: var(--spacing-lg);
+  border-bottom: 1px solid var(--border-light);
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.modal-title {
+  font-size: 18px;
+  font-weight: 600;
+}
+
+.btn-close {
+  background: var(--bg-app);
+  border: none;
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  color: var(--text-secondary);
+  transition: all 0.2s;
+}
+
+.btn-close:hover {
+  background: var(--bg-sidebar);
+  color: var(--text-primary);
+}
+
+.modal-body {
+  flex: 1;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  padding: var(--spacing-lg);
+  gap: var(--spacing-lg);
+}
+
+@keyframes fadeIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes slideUp {
+  from { transform: translateY(20px); opacity: 0; }
+  to { transform: translateY(0); opacity: 1; }
+}
+
+/* Process Table in Modal */
+.modal-toolbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.search-input {
+  background: var(--bg-app);
+  border: 1px solid transparent;
+  padding: 8px 12px;
+  border-radius: var(--radius-sm);
+  font-size: 13px;
+  color: var(--text-primary);
+  width: 240px;
+  outline: none;
+  transition: all 0.2s;
+}
+
+.search-input:focus {
+  background: var(--bg-card);
+  border-color: var(--accent-blue);
+  box-shadow: 0 0 0 3px rgba(0, 113, 227, 0.1);
+}
+
+/* Table Styles (Reused) */
+.table-container {
+  flex: 1;
+  overflow-y: auto;
+  border: 1px solid var(--border-light);
+  border-radius: var(--radius-md);
+  background: var(--bg-card);
+}
+
+.process-table {
+  width: 100%;
+  border-collapse: collapse;
+  text-align: left;
+}
+
+.process-table th {
+  position: sticky;
+  top: 0;
+  background: var(--bg-app);
+  padding: 10px 16px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  font-size: 12px;
+  border-bottom: 1px solid var(--border-light);
+  z-index: 1;
+}
+
+.process-table td {
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--border-light);
+  color: var(--text-primary);
+  font-size: 13px;
+}
+
+.process-table tr:hover {
+  background: var(--bg-app);
+}
+
+/* Custom Scrollbar - Slim & Overlay Style */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(0, 0, 0, 0.15);
+  border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(0, 0, 0, 0.25);
+}
+
+@media (prefers-color-scheme: dark) {
+  ::-webkit-scrollbar-thumb {
+    background: rgba(255, 255, 255, 0.15);
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background: rgba(255, 255, 255, 0.25);
+  }
+}
