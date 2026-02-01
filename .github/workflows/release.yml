@@ -53,6 +53,10 @@ jobs:
         working-directory: crates/gpu-monitor-gui/src-web
         run: npm install
 
+      - name: Build Frontend
+        working-directory: crates/gpu-monitor-gui/src-web
+        run: npm run build
+
       - name: Install Tauri CLI
         run: cargo install tauri-cli --version "^2.0.0" --locked
 
