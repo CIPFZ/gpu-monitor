@@ -2,9 +2,14 @@ name: Release
 
 on:
   push:
-    tags:
-      - 'v*'
+    tags: ['v*']
   workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
 
 jobs:
   build-cli:
@@ -12,66 +17,58 @@ jobs:
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Install Dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libnvidia-ml-dev
-
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Test CLI and core
+        run: cargo test --locked -p gpu-monitor-core -p gpu-monitor-cli
       - name: Build CLI
-        run: cargo build --release --bin gpu-monitor
-
-      - name: Upload CLI Artifact
-        uses: actions/upload-artifact@v4
+        run: cargo build --locked --release --bin gpu-monitor
+      - uses: actions/upload-artifact@v4
         with:
           name: gpu-monitor-cli
           path: target/release/gpu-monitor
+          if-no-files-found: error
 
   build-gui:
-    name: Build GUI (.deb)
+    name: Build GUI packages
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Install Node.js
-        uses: actions/setup-node@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-node@v4
         with:
-          node-version: 20
-
-      - name: Install System Dependencies
+          node-version: 22
+          cache: npm
+          cache-dependency-path: crates/gpu-monitor-gui/src-web/package-lock.json
+      - uses: Swatinem/rust-cache@v2
+      - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential curl wget file libssl-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev
-
-      - name: Install Frontend Dependencies
+          sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential libssl-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev
+      - name: Install frontend dependencies
         working-directory: crates/gpu-monitor-gui/src-web
-        run: npm install
-
-      - name: Build Frontend
+        run: npm ci
+      - name: Test frontend
         working-directory: crates/gpu-monitor-gui/src-web
-        run: npm run build
-
-      - name: Install Tauri CLI
-        run: cargo install tauri-cli --version "^2.0.0" --locked
-
-      - name: Build Tauri App
+        run: npm test
+      - name: Test backend
+        run: cargo test --locked -p gpu-monitor-gui
+      - name: Build Tauri app (also builds frontend)
         working-directory: crates/gpu-monitor-gui
-        run: cargo tauri build
-
-      - name: Upload GUI Artifact
-        uses: actions/upload-artifact@v4
+        run: npx --yes --package @tauri-apps/cli@2.11.3 tauri build --ci -- --locked
+      - uses: actions/upload-artifact@v4
         with:
           name: gpu-monitor-gui-deb
-          path: crates/gpu-monitor-gui/target/release/bundle/deb/*.deb
+          path: target/release/bundle/deb/*.deb
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        with:
+          name: gpu-monitor-gui-appimage
+          path: target/release/bundle/appimage/*.AppImage
+          if-no-files-found: error
 
   publish-release:
-    name: Publish Release
+    name: Publish release
     needs: [build-cli, build-gui]
     runs-on: ubuntu-22.04
     if: startsWith(github.ref, 'refs/tags/')
@@ -81,16 +78,11 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
-
-      - name: List Artifacts
-        run: ls -R artifacts
-
-      - name: Create Release
-        uses: softprops/action-gh-release@v1
+      - uses: softprops/action-gh-release@v2
         with:
           files: |
             artifacts/gpu-monitor-cli/gpu-monitor
             artifacts/gpu-monitor-gui-deb/*.deb
-          draft: false
-          prerelease: false
+            artifacts/gpu-monitor-gui-appimage/*.AppImage
+          fail_on_unmatched_files: true
           generate_release_notes: true

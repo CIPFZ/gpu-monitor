@@ -1,38 +1,45 @@
-//! Error types for GPU monitoring operations
+//! Stable sampling errors shared by every client.
 
 use thiserror::Error;
 
-/// Result type alias using our Error type
-pub type Result<T> = std::result::Result<T, Error>;
-
-/// Errors that can occur during GPU monitoring
-#[derive(Error, Debug)]
-pub enum Error {
-    /// NVML library initialization failed
-    #[error("Failed to initialize NVML: {0}")]
-    NvmlInit(String),
-
-    /// NVML operation failed
-    #[error("NVML error: {0}")]
-    Nvml(#[from] nvml_wrapper::error::NvmlError),
-
-    /// No GPU devices found
-    #[error("No NVIDIA GPU devices found")]
+/// Stable error categories shared by JSON, CLI and GUI clients.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ErrorKind {
+    NotSupported,
+    PermissionDenied,
+    DeviceLost,
+    Uninitialized,
     NoDevices,
+    Unknown,
+}
 
-    /// Invalid device index
-    #[error("Invalid GPU device index: {0}")]
-    InvalidDevice(u32),
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, Error)]
+#[error("{message}")]
+pub struct SampleError {
+    pub kind: ErrorKind,
+    pub message: String,
+}
 
-    /// Failed to get process information
-    #[error("Failed to get process info: {0}")]
-    ProcessInfo(String),
-
-    /// IO error
-    #[error("IO error: {0}")]
-    Io(#[from] std::io::Error),
-
-    /// Serialization error
-    #[error("Serialization error: {0}")]
-    Serialization(#[from] serde_json::Error),
+impl From<nvml_wrapper::error::NvmlError> for SampleError {
+    fn from(error: nvml_wrapper::error::NvmlError) -> Self {
+        use nvml_wrapper::error::NvmlError;
+        let kind = match &error {
+            NvmlError::NotSupported
+            | NvmlError::FunctionNotFound
+            | NvmlError::FailedToLoadSymbol(_) => ErrorKind::NotSupported,
+            NvmlError::NoPermission | NvmlError::OperatingSystem => ErrorKind::PermissionDenied,
+            NvmlError::GpuLost | NvmlError::ResetRequired => ErrorKind::DeviceLost,
+            NvmlError::Uninitialized
+            | NvmlError::DriverNotLoaded
+            | NvmlError::LibraryNotFound
+            | NvmlError::LibloadingError(_)
+            | NvmlError::LibRmVersionMismatch => ErrorKind::Uninitialized,
+            _ => ErrorKind::Unknown,
+        };
+        Self {
+            kind,
+            message: error.to_string(),
+        }
+    }
 }

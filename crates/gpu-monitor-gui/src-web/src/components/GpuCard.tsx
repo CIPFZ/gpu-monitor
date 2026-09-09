@@ -1,244 +1,88 @@
-import { useState, useEffect } from 'react';
-import { GpuInfo } from '../App';
+import { useState } from 'react';
+import { memoryPercent, processIssues } from '../monitor/models';
+import { DeviceState } from '../monitor/state';
 import Sparkline from './Sparkline';
 import ProcessModal from './ProcessModal';
-import ProcessList from './ProcessList';
+import ProcessPanel from './ProcessPanel';
 
 interface GpuCardProps {
-    gpu: GpuInfo;
+    entry: DeviceState;
+    now: number;
+    stale: boolean;
     mode?: 'compact' | 'expanded';
+    onDetails?: () => void;
 }
-
-function GpuCard({ gpu, mode = 'compact' }: GpuCardProps) {
-    const { device, metrics, memory, processes } = gpu;
-    const [showDetails, setShowDetails] = useState(false);
-    const [searchTerm, setSearchTerm] = useState('');
-    
-    // History state for charts
-    const [loadHistory, setLoadHistory] = useState<number[]>([]);
-    const [memHistory, setMemHistory] = useState<number[]>([]);
-
-    // Update history
-    useEffect(() => {
-        setLoadHistory(prev => {
-            const next = [...prev, metrics.gpu_utilization];
-            return next.slice(-60); // Keep last 60 samples
-        });
-        
-        // Store memory usage as percentage for the chart
-        const memPercent = (memory.used / memory.total) * 100;
-        setMemHistory(prev => {
-            const next = [...prev, memPercent];
-            return next.slice(-60);
-        });
-    }, [metrics.gpu_utilization, memory.used, memory.total]);
-
-    // Calculate display values
-    const memoryUsedGiB = (memory.used / (1024 * 1024 * 1024)).toFixed(1);
-    const memoryTotalGiB = (memory.total / (1024 * 1024 * 1024)).toFixed(1);
-    const powerWatts = (metrics.power_usage / 1000).toFixed(0);
-    
-    const getTempColor = (temp: number) => {
-        if (temp > 85) return 'var(--accent-red)';
-        if (temp > 70) return 'var(--accent-orange)';
-        return 'var(--accent-green)';
-    };
-
-    // Filter processes for expanded mode
-    const filteredProcesses = processes.filter(p => 
-        p.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
-        p.pid.toString().includes(searchTerm)
-    );
-
-    // --- Expanded Mode (Single GPU) ---
-    if (mode === 'expanded') {
-        return (
-            <div className="gpu-expanded">
-                <div className="expanded-header">
-                    <div className="gpu-name-large">{device.name}</div>
-                    <div className="gpu-meta-large">
-                        <span className="meta-tag">GPU {device.index}</span>
+function measurement(value: number | null, unit: string, divisor = 1): string {
+    return value === null ? 'N/A' : `${(value / divisor).toFixed(0)}${unit}`;
+}
+export default function GpuCard({ entry, now, stale, mode = 'compact', onDetails }: GpuCardProps) {
+    const { gpu, history, failure } = entry;
+    const { device, metrics, memory } = gpu;
+    const expanded = mode === 'expanded';
+    const [showProcesses, setShowProcesses] = useState(false);
+    const percent = memoryPercent(memory);
+    const capacity = memory ? `${(memory.used / 1024 ** 3).toFixed(1)} / ${(memory.total / 1024 ** 3).toFixed(1)} GiB` : 'N/A';
+    const secondary = [
+        ['Temperature', measurement(metrics.temperature, '°C')],
+        ['Power Usage', measurement(metrics.power_usage, ' W', 1000)],
+        ['Fan Speed', measurement(metrics.fan_speed, '%')],
+        ...(expanded ? [
+            ['Clock (Graphics)', measurement(metrics.clock_graphics, ' MHz')],
+            ['Clock (Memory)', measurement(metrics.clock_memory, ' MHz')],
+            ['Clock (SM)', measurement(metrics.clock_sm, ' MHz')],
+            ['Memory I/O Busy', measurement(metrics.memory_utilization, '%')],
+            ['Encoder Busy', measurement(metrics.encoder_utilization, '%')],
+            ['Decoder Busy', measurement(metrics.decoder_utilization, '%')],
+        ] : []),
+    ];
+    return <article className={expanded ? 'gpu-expanded' : 'gpu-card'} aria-label={`GPU ${device.index}: ${device.name}`}>
+        <div className={expanded ? 'expanded-header' : 'gpu-header'}>
+            <div>
+                <h2 className={expanded ? 'gpu-name-large' : 'gpu-name'} title={device.name}>{device.name}</h2>
+                <div className={expanded ? 'gpu-meta-large' : 'gpu-meta'}>
+                    <span className="meta-tag">GPU {device.index}</span><span className="meta-tag">PCI {device.pci_bus_id}</span>
+                    {expanded && <>
                         <span className="meta-tag">Driver {device.driver_version}</span>
-                        <span className="meta-tag">PCI {device.pci_bus_id}</span>
-                        <span className="meta-tag">CUDA {device.cuda_version || 'N/A'}</span>
-                        <span className="meta-tag">Power Limit {device.power_limit}W</span>
-                    </div>
-                </div>
-
-                <div className="expanded-metrics-grid">
-                    {/* GPU Load Section */}
-                    <div className="expanded-metric-card">
-                        <div className="metric-header">
-                            <span className="metric-label-large">GPU Load</span>
-                            <span className="metric-value-xl">{metrics.gpu_utilization}%</span>
-                        </div>
-                        <div className="chart-container-large">
-                            <Sparkline 
-                                data={loadHistory} 
-                                color="var(--accent-blue)" 
-                                height={120}
-                                max={100}
-                            />
-                        </div>
-                    </div>
-
-                    {/* Memory Section */}
-                    <div className="expanded-metric-card">
-                        <div className="metric-header">
-                            <span className="metric-label-large">Memory</span>
-                            <div>
-                                <span className="metric-value-xl">{memoryUsedGiB}</span>
-                                <span className="metric-unit-large">/ {memoryTotalGiB} GiB</span>
-                            </div>
-                        </div>
-                        <div className="chart-container-large">
-                            <Sparkline 
-                                data={memHistory} 
-                                color="var(--accent-purple)" 
-                                height={120}
-                                max={100}
-                            />
-                        </div>
-                    </div>
-                </div>
-
-                <div className="secondary-metrics-row">
-                    <div className="stat-box">
-                        <div className="stat-label">Temperature</div>
-                        <div className="stat-value" style={{ color: getTempColor(metrics.temperature) }}>
-                            {metrics.temperature}°C
-                        </div>
-                    </div>
-                    <div className="stat-box">
-                        <div className="stat-label">Power Usage</div>
-                        <div className="stat-value">{powerWatts}W</div>
-                    </div>
-                    <div className="stat-box">
-                        <div className="stat-label">Fan Speed</div>
-                        <div className="stat-value">
-                            {metrics.fan_speed !== null ? `${metrics.fan_speed}%` : 'N/A'}
-                        </div>
-                    </div>
-                    <div className="stat-box">
-                        <div className="stat-label">Clock (Graphics)</div>
-                        <div className="stat-value">{metrics.clock_graphics} MHz</div>
-                    </div>
-                    <div className="stat-box">
-                        <div className="stat-label">Clock (Memory)</div>
-                        <div className="stat-value">{metrics.clock_memory} MHz</div>
-                    </div>
-                </div>
-
-                <div className="expanded-process-section">
-                    <div className="process-toolbar">
-                        <div className="section-title-large">Active Processes ({processes.length})</div>
-                        <input 
-                            type="text" 
-                            className="search-input"
-                            placeholder="Search processes..."
-                            value={searchTerm}
-                            onChange={(e) => setSearchTerm(e.target.value)}
-                        />
-                    </div>
-                    <div className="expanded-table-wrapper">
-                        <ProcessList processes={filteredProcesses} />
-                    </div>
+                        <span className="meta-tag">CUDA {device.cuda_version ?? 'N/A'}</span>
+                        <span className="meta-tag">Power Limit {measurement(device.power_limit, ' W')}</span>
+                        <span className="meta-tag">Maximum Power Limit {measurement(device.power_limit_max, ' W')}</span>
+                        <span className="meta-tag">{device.uuid}</span>
+                    </>}
                 </div>
             </div>
-        );
-    }
-
-    // --- Compact Mode (Multi GPU) ---
-    return (
-        <>
-            <div className="gpu-card">
-                <div className="gpu-header">
-                    <div>
-                        <div className="gpu-name" title={device.name}>{device.name}</div>
-                        <div className="gpu-meta">
-                            <span className="gpu-index">GPU {device.index}</span>
-                            <span>{device.pci_bus_id}</span>
-                        </div>
+        </div>
+        <p className={`sample-status${stale ? ' is-stale' : ''}`}>
+            {stale ? 'Stale · Last successful sample ' : 'Updated '}
+            <time dateTime={new Date(gpu.sampled_at_ms).toISOString()}>{new Date(gpu.sampled_at_ms).toLocaleTimeString()}</time>
+            {failure && ` · ${failure.message}`}
+        </p>
+        {gpu.issues.length > 0 && <details className="data-notice"><summary>{gpu.issues.length} measurement issue{gpu.issues.length === 1 ? '' : 's'} · N/A means unavailable</summary>
+            <ul>{gpu.issues.map((issue, index) => <li key={`${issue.metric}-${index}`}>{issue.metric}: {issue.error.message}</li>)}</ul>
+        </details>}
+        <div className={expanded ? 'expanded-metrics-grid' : 'compact-metrics'}>
+            {(['load', 'memory'] as const).map(metric => <div key={metric} className={expanded ? 'expanded-metric-card' : 'metric-row'}>
+                <div className={expanded ? 'metric-header' : 'metric-info'}>
+                    <span className="metric-label">{metric === 'load' ? 'GPU Load' : 'Memory Capacity'}</span>
+                    <div className={expanded ? 'metric-value-xl' : 'metric-value-large'}>
+                        {metric === 'load' ? measurement(metrics.gpu_utilization, '%') : capacity}
                     </div>
+                    {metric === 'memory' && <span className="metric-unit-small">{measurement(percent, '%')} used</span>}
                 </div>
-
-                <div className="compact-metrics">
-                    {/* GPU Load Row */}
-                    <div className="metric-row">
-                        <div className="metric-info">
-                            <div className="metric-label">GPU Load</div>
-                            <div>
-                                <span className="metric-value-large">{metrics.gpu_utilization}</span>
-                                <span className="metric-unit-small">%</span>
-                            </div>
-                        </div>
-                        <div className="metric-chart">
-                            <Sparkline 
-                                data={loadHistory} 
-                                color="var(--accent-blue)" 
-                                height={40}
-                                max={100}
-                            />
-                        </div>
-                    </div>
-
-                    {/* Memory Row */}
-                    <div className="metric-row">
-                        <div className="metric-info">
-                            <div className="metric-label">Memory</div>
-                            <div>
-                                <span className="metric-value-large">{memoryUsedGiB}</span>
-                                <span className="metric-unit-small">GiB</span>
-                            </div>
-                        </div>
-                        <div className="metric-chart">
-                            <Sparkline 
-                                data={memHistory} 
-                                color="var(--accent-purple)" 
-                                height={40}
-                                max={100}
-                            />
-                        </div>
-                    </div>
+                <div className={expanded ? 'chart-container-large' : 'metric-chart'}>
+                    <Sparkline history={history} metric={metric} now={now}
+                        color={metric === 'load' ? 'var(--accent-blue)' : 'var(--accent-purple)'} height={expanded ? 120 : 40} />
                 </div>
-
-                <div className="secondary-metrics">
-                    <div className="mini-metric">
-                        <span className="mini-label">Temp</span>
-                        <span className="mini-value" style={{ color: getTempColor(metrics.temperature) }}>
-                            {metrics.temperature}°C
-                        </span>
-                    </div>
-                    <div className="mini-metric">
-                        <span className="mini-label">Power</span>
-                        <span className="mini-value">{powerWatts}W</span>
-                    </div>
-                    <div className="mini-metric">
-                        <span className="mini-label">Fan</span>
-                        <span className="mini-value">
-                            {metrics.fan_speed !== null ? `${metrics.fan_speed}%` : '-'}
-                        </span>
-                    </div>
-                </div>
-
-                <div className="card-action">
-                    <button 
-                        className="btn-details"
-                        onClick={() => setShowDetails(true)}
-                    >
-                        View Processes ({processes.length})
-                    </button>
-                </div>
-            </div>
-
-            {showDetails && (
-                <ProcessModal 
-                    gpu={gpu} 
-                    onClose={() => setShowDetails(false)} 
-                />
-            )}
-        </>
-    );
+            </div>)}
+        </div>
+        <div className={expanded ? 'secondary-metrics-row' : 'secondary-metrics'}>{secondary.map(([label, value]) =>
+            <div className={expanded ? 'stat-box' : 'mini-metric'} key={label}>
+                <span className={expanded ? 'stat-label' : 'mini-label'}>{label}</span>
+                <span className={expanded ? 'stat-value' : 'mini-value'}>{value}</span>
+            </div>)}</div>
+        {expanded ? <ProcessPanel gpu={gpu} /> : <div className="card-action">
+            <button className="btn-details" onClick={onDetails}>View Details</button>
+            <button className="btn-details" onClick={() => setShowProcesses(true)}>View Processes ({gpu.processes.length}{processIssues(gpu).length ? ', incomplete' : ''})</button>
+        </div>}
+        {showProcesses && <ProcessModal gpu={gpu} stale={stale} onClose={() => setShowProcesses(false)} />}
+    </article>;
 }
-
-export default GpuCard;

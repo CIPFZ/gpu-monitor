@@ -1,143 +1,270 @@
-//! TUI Application state and event loop
+//! Sampling, device navigation and per-device view state.
 
-use crossterm::event::{self, Event, KeyCode, KeyEventKind};
-use gpu_monitor_core::{GpuInfo, GpuMonitor};
-use std::time::{Duration, Instant};
+use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use gpu_monitor_core::{GpuInfo, MonitorService, MonitorSnapshot};
+use std::{
+    collections::{HashMap, HashSet, VecDeque},
+    time::{Duration, Instant},
+};
 
-use crate::tui::Tui;
-use crate::ui;
+use crate::{tui::Tui, ui};
 
-/// Application state
+pub const MIN_INTERVAL_MS: u64 = 100;
+const HISTORY_SIZE: usize = 60;
+
+#[derive(Debug, Clone)]
+pub struct HistoryPoint {
+    pub sampled_at_ms: u64,
+    pub gpu: Option<u64>,
+    pub memory: Option<u64>,
+}
+
+#[derive(Default)]
+pub struct DeviceView {
+    pub index: u32,
+    pub gpu: Option<GpuInfo>,
+    pub error: Option<String>,
+    pub history: VecDeque<HistoryPoint>,
+    pub process_scroll: usize,
+}
+
+impl DeviceView {
+    fn push_history(&mut self, point: HistoryPoint) {
+        // A snapshot may be delivered more than once, but each acquisition is one sample.
+        if self
+            .history
+            .back()
+            .is_some_and(|last| last.sampled_at_ms == point.sampled_at_ms)
+        {
+            return;
+        }
+        self.history.push_back(point);
+        if self.history.len() > HISTORY_SIZE {
+            self.history.pop_front();
+        }
+    }
+
+    pub fn process_count(&self) -> usize {
+        self.gpu.as_ref().map_or(0, |gpu| gpu.processes.len())
+    }
+}
+
 pub struct App {
-    /// Should the application exit
     exit: bool,
-    /// Refresh interval
     interval: Duration,
-    /// Current GPU data
-    pub gpus: Vec<GpuInfo>,
-    /// Historical GPU usage for sparkline (last 60 samples)
-    pub gpu_history: Vec<Vec<u64>>,
-    /// Historical memory usage
-    pub memory_history: Vec<Vec<u64>>,
-    /// Last refresh time
-    last_refresh: Instant,
-    /// Current scroll position for process list
-    pub process_scroll: u16,
+    last_refresh: Option<Instant>,
+    views: HashMap<String, DeviceView>,
+    order: Vec<String>,
+    selected: Option<String>,
+    pub error: Option<String>,
+    pub failure_count: usize,
+    pub sampled_at_ms: u64,
+    visible_process_rows: usize,
 }
 
 impl App {
-    /// Create a new application instance
     pub fn new(interval_ms: u64) -> Self {
         Self {
             exit: false,
-            interval: Duration::from_millis(interval_ms),
-            gpus: Vec::new(),
-            gpu_history: Vec::new(),
-            memory_history: Vec::new(),
-            last_refresh: Instant::now() - Duration::from_secs(10), // Force immediate refresh
-            process_scroll: 0,
+            interval: Duration::from_millis(interval_ms.max(MIN_INTERVAL_MS)),
+            last_refresh: None,
+            views: HashMap::new(),
+            order: Vec::new(),
+            selected: None,
+            error: None,
+            failure_count: 0,
+            sampled_at_ms: 0,
+            visible_process_rows: 0,
         }
     }
 
-    /// Run the application main loop
-    pub fn run(&mut self, terminal: &mut Tui, monitor: &GpuMonitor) -> anyhow::Result<()> {
+    pub fn run(&mut self, terminal: &mut Tui, monitor: &mut MonitorService) -> anyhow::Result<()> {
         while !self.exit {
-            // Refresh data if interval has passed
-            if self.last_refresh.elapsed() >= self.interval {
-                self.refresh_data(monitor)?;
-                self.last_refresh = Instant::now();
+            if self
+                .last_refresh
+                .is_none_or(|last| last.elapsed() >= self.interval)
+            {
+                self.apply_snapshot(monitor.sample());
+                self.last_refresh = Some(Instant::now());
             }
-
-            // Draw UI
             terminal.draw(|frame| ui::draw(frame, self))?;
-
-            // Handle events with timeout
-            if event::poll(Duration::from_millis(100))? {
-                self.handle_events()?;
-            }
-        }
-
-        Ok(())
-    }
-
-    /// Refresh GPU data
-    fn refresh_data(&mut self, monitor: &GpuMonitor) -> anyhow::Result<()> {
-        self.gpus = monitor.get_all_gpu_info()?;
-
-        // Ensure history vectors are properly sized
-        while self.gpu_history.len() < self.gpus.len() {
-            self.gpu_history.push(Vec::new());
-            self.memory_history.push(Vec::new());
-        }
-
-        // Update history
-        for (i, gpu) in self.gpus.iter().enumerate() {
-            self.gpu_history[i].push(gpu.metrics.gpu_utilization as u64);
-            self.memory_history[i].push(gpu.memory.usage_percent() as u64);
-
-            // Keep last 60 samples
-            if self.gpu_history[i].len() > 60 {
-                self.gpu_history[i].remove(0);
-            }
-            if self.memory_history[i].len() > 60 {
-                self.memory_history[i].remove(0);
-            }
-        }
-
-        // Validate scroll position after data refresh
-        // If processes list shrunk, we might need to adjust scroll
-        if !self.gpus.is_empty() {
-            // For simplicity, we use the first GPU's process count as reference for scrolling
-            // In a multi-GPU scenario with independent scrolling, this would need to be per-GPU
-            let max_processes = self.gpus[0].processes.len();
-            // Assuming visible rows is roughly 10 (this is an approximation, ideally we'd get this from UI layout)
-            let visible_rows = 10;
-
-            if max_processes > visible_rows {
-                let max_scroll = (max_processes - visible_rows) as u16;
-                if self.process_scroll > max_scroll {
-                    self.process_scroll = max_scroll;
-                }
-            } else {
-                self.process_scroll = 0;
-            }
-        }
-
-        Ok(())
-    }
-
-    /// Handle keyboard events
-    fn handle_events(&mut self) -> anyhow::Result<()> {
-        if let Event::Key(key) = event::read()? {
-            if key.kind == KeyEventKind::Press {
-                match key.code {
-                    KeyCode::Char('q') | KeyCode::Esc => self.exit = true,
-                    KeyCode::Up | KeyCode::Char('k') => {
-                        self.process_scroll = self.process_scroll.saturating_sub(1);
+            let timeout = self.last_refresh.map_or(Duration::ZERO, |last| {
+                self.interval
+                    .saturating_sub(last.elapsed())
+                    .min(Duration::from_millis(100))
+            });
+            if event::poll(timeout)? {
+                if let Event::Key(key) = event::read()? {
+                    if self.handle_key(key) {
+                        monitor.retry();
+                        self.last_refresh = None;
                     }
-                    KeyCode::Down | KeyCode::Char('j') => {
-                        // Calculate max scroll
-                        let max_processes = if !self.gpus.is_empty() {
-                            self.gpus[0].processes.len()
-                        } else {
-                            0
-                        };
+                }
+            }
+        }
+        Ok(())
+    }
 
-                        // Approximate visible rows (this should match UI layout)
-                        // In ui.rs, the table constraint is Min(12), so roughly 10-12 rows visible
-                        let visible_rows = 10;
+    pub fn apply_snapshot(&mut self, snapshot: MonitorSnapshot) {
+        self.sampled_at_ms = snapshot.sampled_at_ms;
+        self.failure_count = snapshot.failures.len();
+        self.error = snapshot.error.map(|error| error.message);
+        let mut present = HashSet::new();
+        for gpu in snapshot.gpus {
+            let key = gpu.device.uuid.clone();
+            present.insert(key.clone());
+            let fallback = format!("index:{}", gpu.device.index);
+            if let Some(previous) = self.views.remove(&fallback) {
+                self.views.entry(key.clone()).or_insert(previous);
+                if self.selected.as_deref() == Some(&fallback) {
+                    self.selected = Some(key.clone());
+                }
+            }
+            let view = self.views.entry(key).or_default();
+            view.index = gpu.device.index;
+            view.error = None;
+            view.push_history(HistoryPoint {
+                sampled_at_ms: gpu.sampled_at_ms,
+                gpu: gpu.metrics.gpu_utilization.map(u64::from),
+                memory: gpu
+                    .memory
+                    .as_ref()
+                    .map(|memory| memory.usage_percent() as u64),
+            });
+            view.gpu = Some(gpu);
+        }
+        for failure in snapshot.failures {
+            let key = failure
+                .uuid
+                .or_else(|| {
+                    self.views
+                        .iter()
+                        .find(|(_, view)| view.index == failure.index)
+                        .map(|(key, _)| key.clone())
+                })
+                .unwrap_or_else(|| format!("index:{}", failure.index));
+            present.insert(key.clone());
+            let view = self.views.entry(key).or_default();
+            view.index = failure.index;
+            view.error = Some(failure.error.message);
+            view.push_history(HistoryPoint {
+                sampled_at_ms: snapshot.sampled_at_ms,
+                gpu: None,
+                memory: None,
+            });
+        }
+        if let Some(error) = &self.error {
+            for (key, view) in &mut self.views {
+                if !present.contains(key) {
+                    view.error = Some(error.clone());
+                    view.push_history(HistoryPoint {
+                        sampled_at_ms: snapshot.sampled_at_ms,
+                        gpu: None,
+                        memory: None,
+                    });
+                }
+            }
+        } else {
+            self.views.retain(|key, _| present.contains(key));
+        }
+        self.order = self.views.keys().cloned().collect();
+        self.order
+            .sort_by_key(|key| (self.views[key].index, key.clone()));
+        if self
+            .selected
+            .as_ref()
+            .is_none_or(|key| !self.views.contains_key(key))
+        {
+            self.selected = self.order.first().cloned();
+        }
+        self.clamp_scroll();
+    }
 
-                        if max_processes > visible_rows {
-                            let max_scroll = (max_processes - visible_rows) as u16;
-                            if self.process_scroll < max_scroll {
-                                self.process_scroll += 1;
-                            }
+    pub fn selected_view(&self) -> Option<&DeviceView> {
+        self.selected.as_ref().and_then(|key| self.views.get(key))
+    }
+
+    fn selected_view_mut(&mut self) -> Option<&mut DeviceView> {
+        self.selected
+            .as_ref()
+            .and_then(|key| self.views.get_mut(key))
+    }
+
+    pub fn selected_position(&self) -> usize {
+        self.selected
+            .as_ref()
+            .and_then(|key| self.order.iter().position(|candidate| candidate == key))
+            .unwrap_or(0)
+    }
+
+    pub fn device_count(&self) -> usize {
+        self.order.len()
+    }
+
+    // Called with the actual table body height, after layout, before rendering rows.
+    pub fn set_process_viewport(&mut self, rows: usize) {
+        self.visible_process_rows = rows;
+        self.clamp_scroll();
+    }
+
+    fn clamp_scroll(&mut self) {
+        let visible = self.visible_process_rows.max(1);
+        if let Some(view) = self.selected_view_mut() {
+            view.process_scroll = view
+                .process_scroll
+                .min(view.process_count().saturating_sub(visible));
+        }
+    }
+
+    fn select_relative(&mut self, forward: bool) {
+        if self.order.is_empty() {
+            return;
+        }
+        let position = self.selected_position();
+        let next = if forward {
+            (position + 1) % self.order.len()
+        } else {
+            (position + self.order.len() - 1) % self.order.len()
+        };
+        self.selected = Some(self.order[next].clone());
+        self.clamp_scroll();
+    }
+
+    /// Returns true when the user requests immediate reinitialization.
+    pub fn handle_key(&mut self, key: KeyEvent) -> bool {
+        if key.kind == KeyEventKind::Release {
+            return false;
+        }
+        if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
+            self.exit = true;
+            return false;
+        }
+        let page = self.visible_process_rows.max(1);
+        match key.code {
+            KeyCode::Char('q') | KeyCode::Esc => self.exit = true,
+            KeyCode::Char('r') => return true,
+            KeyCode::Right | KeyCode::Tab | KeyCode::Char(']') => self.select_relative(true),
+            KeyCode::Left | KeyCode::BackTab | KeyCode::Char('[') => self.select_relative(false),
+            code => {
+                if self.visible_process_rows == 0 {
+                    return false;
+                }
+                if let Some(view) = self.selected_view_mut() {
+                    let max = view.process_count().saturating_sub(page);
+                    view.process_scroll = match code {
+                        KeyCode::Up | KeyCode::Char('k') => view.process_scroll.saturating_sub(1),
+                        KeyCode::Down | KeyCode::Char('j') => {
+                            view.process_scroll.saturating_add(1).min(max)
                         }
-                    }
-                    _ => {}
+                        KeyCode::PageUp => view.process_scroll.saturating_sub(page),
+                        KeyCode::PageDown => view.process_scroll.saturating_add(page).min(max),
+                        KeyCode::Home => 0,
+                        KeyCode::End => max,
+                        _ => view.process_scroll,
+                    };
                 }
             }
         }
-        Ok(())
+        false
     }
 }

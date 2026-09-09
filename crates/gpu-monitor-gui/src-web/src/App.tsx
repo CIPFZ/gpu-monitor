@@ -1,168 +1,39 @@
-import { useState, useEffect } from 'react';
-import { invoke } from '@tauri-apps/api/core';
+import { useEffect, useRef, useState } from 'react';
 import GpuCard from './components/GpuCard';
+import { useMonitor } from './monitor/useMonitor';
+import { isDeviceStale } from './monitor/state';
 
-// Types matching Rust structures
-interface MemoryInfo {
-    total: number;
-    used: number;
-    free: number;
-}
+export default function App() {
+    const { state, now, status, retry, retrying } = useMonitor();
+    const [query, setQuery] = useState('');
+    const [selectedUuid, setSelectedUuid] = useState<string | null>(null);
+    const detailContainer = useRef<HTMLDivElement>(null);
+    const entries = Object.values(state.devices).sort((a, b) => a.gpu.device.index - b.gpu.device.index);
+    const selected = selectedUuid ? state.devices[selectedUuid] : entries.length === 1 ? entries[0] : undefined;
+    const filtered = entries.filter(({ gpu }) => `${gpu.device.name} ${gpu.device.index} ${gpu.device.uuid}`.toLowerCase().includes(query.toLowerCase()));
+    const unknownFailures = state.failures.filter(failure => !entries.some(({ gpu }) => failure.uuid === gpu.device.uuid || (failure.uuid === null && failure.index === gpu.device.index)));
+    useEffect(() => { if (selectedUuid) detailContainer.current?.focus(); }, [selectedUuid]);
 
-interface GpuMetrics {
-    gpu_utilization: number;
-    memory_utilization: number;
-    encoder_utilization: number;
-    decoder_utilization: number;
-    temperature: number;
-    power_usage: number;
-    fan_speed: number | null;
-    clock_graphics: number;
-    clock_memory: number;
-    clock_sm: number;
-}
-
-interface DeviceInfo {
-    index: number;
-    name: string;
-    uuid: string;
-    pci_bus_id: string;
-    driver_version: string;
-    cuda_version: string | null;
-    power_limit: number;
-    power_limit_max: number;
-}
-
-interface GpuProcess {
-    pid: number;
-    name: string;
-    gpu_memory: number;
-    process_type: 'Graphics' | 'Compute' | 'Mixed' | 'Unknown';
-}
-
-export interface GpuInfo {
-    device: DeviceInfo;
-    metrics: GpuMetrics;
-    memory: MemoryInfo;
-    processes: GpuProcess[];
-}
-
-function App() {
-    const [gpus, setGpus] = useState<GpuInfo[]>([]);
-    const [loading, setLoading] = useState(true);
-    const [error, setError] = useState<string | null>(null);
-    const [searchTerm, setSearchTerm] = useState('');
-
-    useEffect(() => {
-        const fetchGpuInfo = async () => {
-            try {
-                const data = await invoke<GpuInfo[]>('get_gpu_info');
-                setGpus(data);
-                setError(null);
-            } catch (err: any) {
-                setError(err.message || 'Failed to get GPU info');
-            } finally {
-                setLoading(false);
-            }
-        };
-
-        // Initial fetch
-        fetchGpuInfo();
-
-        // Refresh every second
-        const interval = setInterval(fetchGpuInfo, 1000);
-
-        return () => clearInterval(interval);
-    }, []);
-
-    // Filter GPUs based on search term
-    const filteredGpus = gpus.filter(gpu => 
-        gpu.device.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
-        gpu.device.index.toString().includes(searchTerm) ||
-        gpu.device.uuid.toLowerCase().includes(searchTerm.toLowerCase())
-    );
-
-    if (loading) {
-        return (
-            <div className="app-container" style={{ justifyContent: 'center', alignItems: 'center' }}>
-                <div className="status-badge" style={{ background: 'transparent', border: 'none', color: 'var(--text-secondary)' }}>
-                    Loading GPU info...
-                </div>
+    return <div className="app-container">
+        <header className="app-header">
+            <div className="app-icon" aria-hidden="true">G</div>
+            <div className="header-content"><h1 className="app-title">GPU Monitor</h1><div className="app-subtitle">Real-time Performance</div></div>
+            <div className="header-controls">
+                {entries.length > 1 && !selected && <div className="gpu-search">
+                    <input type="search" aria-label="Filter GPUs" placeholder={`Filter ${entries.length} GPUs...`} value={query} onChange={event => setQuery(event.target.value)} />
+                </div>}
+                <div className={`status-badge status-${status.toLowerCase()}`} role="status"><span className="status-dot" /><span>{status}</span></div>
+                {status !== 'Live' && <button className="btn-retry" onClick={() => void retry()} disabled={retrying}>{retrying ? 'Retrying…' : 'Retry'}</button>}
             </div>
-        );
-    }
-
-    if (error) {
-        return (
-            <div className="app-container" style={{ justifyContent: 'center', alignItems: 'center' }}>
-                <div style={{ textAlign: 'center' }}>
-                    <div style={{ fontSize: '48px', marginBottom: '16px' }}>⚠️</div>
-                    <p style={{ color: 'var(--text-secondary)' }}>{error}</p>
-                </div>
-            </div>
-        );
-    }
-
-    // Determine view mode
-    const isSingleGpu = gpus.length === 1;
-
-    return (
-        <div className="app-container">
-            <header className="app-header">
-                <div className="app-icon">G</div>
-                <div className="header-content">
-                    <div className="app-title">GPU Monitor</div>
-                    <div className="app-subtitle">Real-time Performance</div>
-                </div>
-                
-                <div className="header-controls">
-                    {!isSingleGpu && gpus.length > 1 && (
-                        <div className="gpu-search">
-                            <svg className="search-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                                <circle cx="11" cy="11" r="8"></circle>
-                                <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
-                            </svg>
-                            <input 
-                                type="text" 
-                                placeholder={`Filter ${gpus.length} GPUs...`}
-                                value={searchTerm}
-                                onChange={(e) => setSearchTerm(e.target.value)}
-                            />
-                        </div>
-                    )}
-                    <div className="status-badge">
-                        <span className="status-dot" />
-                        <span>Live</span>
-                    </div>
-                </div>
-            </header>
-
-            {isSingleGpu ? (
-                // Single GPU View (Expanded)
-                <div className="gpu-expanded-container">
-                    <GpuCard gpu={gpus[0]} mode="expanded" />
-                </div>
-            ) : (
-                // Multi GPU View (Grid)
-                <div className="gpu-grid">
-                    {filteredGpus.length > 0 ? (
-                        filteredGpus.map((gpu) => (
-                            <GpuCard key={gpu.device.uuid} gpu={gpu} mode="compact" />
-                        ))
-                    ) : (
-                        <div style={{ 
-                            gridColumn: '1 / -1', 
-                            textAlign: 'center', 
-                            color: 'var(--text-secondary)',
-                            padding: '40px'
-                        }}>
-                            No GPUs found matching "{searchTerm}"
-                        </div>
-                    )}
-                </div>
-            )}
-        </div>
-    );
+        </header>
+        {state.error && <p className="data-notice" role="alert">{state.error.message}{entries.length > 0 ? ' · Showing the last successful samples.' : ''}</p>}
+        {unknownFailures.map(failure => <p className="data-notice" role="alert" key={failure.uuid ?? failure.index}>GPU {failure.index}: {failure.error.message}</p>)}
+        {selected ? <div ref={detailContainer} tabIndex={-1} className="gpu-expanded-container" aria-label="GPU details">
+            {entries.length > 1 && <button className="btn-back" onClick={() => setSelectedUuid(null)}>← All GPUs</button>}
+            <GpuCard key={selected.gpu.device.uuid} entry={selected} now={now} stale={isDeviceStale(selected, state, now)} mode="expanded" />
+        </div> : <main className="gpu-grid">
+            {filtered.map(entry => <GpuCard key={entry.gpu.device.uuid} entry={entry} now={now} stale={isDeviceStale(entry, state, now)} onDetails={() => setSelectedUuid(entry.gpu.device.uuid)} />)}
+            {!filtered.length && <p className="empty-message">{!state.received ? 'Connecting to GPU monitor…' : entries.length ? `No GPUs matching “${query}”` : state.error || state.failures.length ? 'GPU data is unavailable. Monitoring will retry automatically.' : 'No GPUs detected.'}</p>}
+        </main>}
+    </div>;
 }
-
-export default App;

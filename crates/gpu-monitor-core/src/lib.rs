@@ -1,20 +1,19 @@
-//! GPU Monitor Core Library
+//! GPU monitoring through NVIDIA Management Library (NVML).
 //!
-//! Provides GPU monitoring functionality through NVIDIA Management Library (NVML).
-//!
-//! # Features
-//! - GPU device information
-//! - Real-time metrics (usage, memory, temperature, power)
-//! - Process monitoring
+//! Each sample carries a timestamp, per-device failures and unavailable metrics.
+//! Initialization happens on the first sample and is retried after failures.
 //!
 //! # Example
 //! ```no_run
-//! use gpu_monitor_core::GpuMonitor;
+//! use gpu_monitor_core::MonitorService;
 //!
-//! let monitor = GpuMonitor::new()?;
-//! let gpus = monitor.get_all_gpu_info()?;
-//! for gpu in gpus {
-//!     println!("{}: {}% usage", gpu.name, gpu.metrics.gpu_utilization);
+//! let mut monitor = MonitorService::new();
+//! let snapshot = monitor.sample();
+//! for gpu in snapshot.gpus {
+//!     println!("{}: {:?}% usage", gpu.device.name, gpu.metrics.gpu_utilization);
+//! }
+//! if let Some(error) = snapshot.error {
+//!     eprintln!("{error}");
 //! }
 //! ```
 
@@ -23,22 +22,46 @@ mod error;
 pub mod metrics;
 mod monitor;
 mod process;
+mod service;
 
 pub use device::{DeviceInfo, MemoryInfo};
-pub use error::{Error, Result};
+pub use error::{ErrorKind, SampleError};
 pub use metrics::GpuMetrics;
-pub use monitor::GpuMonitor;
-pub use process::GpuProcess;
+pub use process::{GpuProcess, ProcessType};
+pub use service::MonitorService;
 
-/// Complete GPU information including device info, metrics, and processes
+/// Complete GPU information for a single sample. Missing metrics are never zero-filled.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct GpuInfo {
-    /// Device information (name, UUID, etc.)
     pub device: DeviceInfo,
-    /// Current metrics (usage, temperature, etc.)
     pub metrics: GpuMetrics,
-    /// Memory information
-    pub memory: MemoryInfo,
-    /// Processes using this GPU
+    pub memory: Option<MemoryInfo>,
+    /// Results from successful process queries; consult `issues` for partial failures.
     pub processes: Vec<GpuProcess>,
+    pub sampled_at_ms: u64,
+    pub issues: Vec<MetricIssue>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct MetricIssue {
+    pub metric: String,
+    pub error: SampleError,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct DeviceFailure {
+    pub index: u32,
+    pub uuid: Option<String>,
+    pub error: SampleError,
+}
+
+/// A sampling round. Healthy devices remain available when other devices fail.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct MonitorSnapshot {
+    /// Unix timestamp in milliseconds. Unchanged cached responses have the same timestamp.
+    pub sampled_at_ms: u64,
+    pub gpus: Vec<GpuInfo>,
+    pub failures: Vec<DeviceFailure>,
+    /// Initialization/enumeration error, independent of per-device failures.
+    pub error: Option<SampleError>,
 }

@@ -1,7 +1,6 @@
 # Rust
 /target
 **/*.rs.bk
-Cargo.lock
 
 # IDEs
 .idea/
@@ -25,6 +24,7 @@ crates/gpu-monitor-gui/src-web/src-tauri/target/
 crates/gpu-monitor-gui/gen/
 
 # Build artifacts
+__pycache__/
 *.deb
 *.AppImage
 *.tar.gz

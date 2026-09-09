@@ -1,4 +1,4 @@
-//! Terminal setup and restoration utilities
+//! Terminal ownership and restoration, including early errors and unwinding.
 
 use crossterm::{
     execute,
@@ -7,22 +7,36 @@ use crossterm::{
 use ratatui::{backend::CrosstermBackend, Terminal};
 use std::io::{self, stdout, Stdout};
 
-/// A type alias for the terminal type used in this application
 pub type Tui = Terminal<CrosstermBackend<Stdout>>;
 
-/// Initialize the terminal for TUI mode
-pub fn init() -> io::Result<Tui> {
-    execute!(stdout(), EnterAlternateScreen)?;
-    enable_raw_mode()?;
-    let backend = CrosstermBackend::new(stdout());
-    let mut terminal = Terminal::new(backend)?;
-    terminal.clear()?;
-    Ok(terminal)
+pub struct TerminalSession {
+    pub terminal: Tui,
+    _restore: RestoreTerminal,
 }
 
-/// Restore the terminal to its original state
+struct RestoreTerminal;
+
+impl Drop for RestoreTerminal {
+    fn drop(&mut self) {
+        let _ = restore();
+    }
+}
+
+pub fn init() -> io::Result<TerminalSession> {
+    enable_raw_mode()?;
+    let guard = RestoreTerminal;
+    execute!(stdout(), EnterAlternateScreen)?;
+    let mut terminal = Terminal::new(CrosstermBackend::new(stdout()))?;
+    terminal.clear()?;
+    Ok(TerminalSession {
+        terminal,
+        _restore: guard,
+    })
+}
+
 pub fn restore() -> io::Result<()> {
-    execute!(stdout(), LeaveAlternateScreen)?;
-    disable_raw_mode()?;
-    Ok(())
+    // Always attempt both operations, even when one fails.
+    let raw_result = disable_raw_mode();
+    let screen_result = execute!(stdout(), LeaveAlternateScreen, crossterm::cursor::Show);
+    raw_result.and(screen_result)
 }

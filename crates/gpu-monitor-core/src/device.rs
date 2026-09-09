@@ -18,9 +18,9 @@ pub struct DeviceInfo {
     /// CUDA version (if available)
     pub cuda_version: Option<String>,
     /// Power limit in watts
-    pub power_limit: u32,
+    pub power_limit: Option<u32>,
     /// Maximum power limit in watts
-    pub power_limit_max: u32,
+    pub power_limit_max: Option<u32>,
 }
 
 /// GPU memory information

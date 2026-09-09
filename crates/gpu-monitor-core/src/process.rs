@@ -10,15 +10,15 @@ pub struct GpuProcess {
     /// Process name (executable name)
     pub name: String,
     /// GPU memory used by this process in bytes
-    pub gpu_memory: u64,
+    pub gpu_memory: Option<u64>,
     /// Process type
     pub process_type: ProcessType,
 }
 
 impl GpuProcess {
     /// Get GPU memory usage in MiB
-    pub fn gpu_memory_mib(&self) -> u64 {
-        self.gpu_memory / (1024 * 1024)
+    pub fn gpu_memory_mib(&self) -> Option<u64> {
+        self.gpu_memory.map(|value| value / (1024 * 1024))
     }
 }
 

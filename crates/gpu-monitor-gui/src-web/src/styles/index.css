@@ -677,3 +677,39 @@ body {
     background: rgba(255, 255, 255, 0.25);
   }
 }
+
+/* Monitoring states and details share the same live snapshot and history. */
+.status-stale, .status-connecting { color: var(--accent-orange); background: transparent; border-color: currentColor; }
+.status-offline { color: var(--accent-red); background: transparent; border-color: currentColor; }
+.data-notice { color: var(--text-primary); background: var(--bg-sidebar); padding: 10px 14px; border-radius: var(--radius-sm); line-height: 1.5; overflow-wrap: anywhere; }
+.data-notice summary { cursor: pointer; }
+.data-notice ul { padding-left: 20px; }
+.sample-status { color: var(--text-secondary); font-size: 11px; line-height: 1.5; }
+.sample-status.is-stale { color: var(--accent-orange); }
+.btn-retry, .btn-back { background: var(--bg-card); border: 1px solid var(--border-light); border-radius: var(--radius-sm); padding: 7px 12px; color: var(--accent-blue); cursor: pointer; }
+.btn-back { margin-bottom: 16px; }
+button:disabled { opacity: .6; cursor: wait; }
+button:focus-visible, input:focus-visible, summary:focus-visible { outline: 2px solid var(--accent-blue); outline-offset: 3px; }
+.card-action { display: flex; gap: 8px; }
+.chart-axis { display: flex; justify-content: space-between; color: var(--text-secondary); font-size: 9px; }
+.metric-info { width: 140px; }
+.metric-chart { min-width: 0; height: auto; }
+.metric-value-large { font-size: 16px; }
+.metric-header { flex-wrap: wrap; gap: 6px; }
+.metric-value-xl { font-size: clamp(20px, 2.5vw, 32px); }
+.secondary-metrics-row { grid-template-columns: repeat(auto-fit, minmax(125px, 1fr)); }
+.process-dialog { margin: auto; width: min(90vw, 850px); height: 80vh; border: 1px solid var(--border-light); border-radius: var(--radius-lg); background: var(--bg-card); color: var(--text-primary); padding: 0; }
+.process-dialog[open] { display: flex; flex-direction: column; }
+.process-dialog::backdrop { background: var(--bg-modal-overlay); backdrop-filter: blur(4px); }
+.process-dialog .expanded-process-section { min-height: 0; }
+.empty-message { text-align: center; padding: 32px; color: var(--text-secondary); grid-column: 1 / -1; }
+.meta-tag { overflow-wrap: anywhere; }
+@media (max-width: 700px) {
+  .app-container { padding: 16px; gap: 16px; }
+  .app-header { flex-wrap: wrap; gap: 10px; }
+  .header-controls { flex-wrap: wrap; gap: 10px; }
+  .expanded-metrics-grid { grid-template-columns: 1fr; }
+  .gpu-grid { grid-template-columns: minmax(0, 1fr); }
+  .process-toolbar { flex-wrap: wrap; gap: 12px; }
+  .search-input { width: min(100%, 240px); }
+}

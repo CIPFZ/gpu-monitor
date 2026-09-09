@@ -1,214 +1,238 @@
-//! GPU Monitor CLI
-//!
-//! Terminal-based GPU monitoring tool with multiple output modes.
+//! Terminal-based GPU monitoring with machine-readable failure information.
 
 mod app;
+#[cfg(test)]
+mod tests;
 mod tui;
 mod ui;
 
 use clap::{Parser, Subcommand};
-use gpu_monitor_core::GpuMonitor;
+use gpu_monitor_core::{MonitorService, MonitorSnapshot};
 
-/// GPU Monitor - Real-time NVIDIA GPU monitoring
-#[derive(Parser)]
-#[command(name = "gpu-monitor")]
-#[command(author, version, about, long_about = None)]
+#[derive(Parser, Debug)]
+#[command(
+    name = "gpu-monitor",
+    author,
+    version,
+    about = "Real-time NVIDIA GPU monitoring"
+)]
 struct Cli {
-    /// Print GPU info once and exit (similar to nvidia-smi)
+    /// Print GPU info once and exit
     #[arg(short, long)]
     once: bool,
-
-    /// Continuous output mode (TUI with charts)
+    /// Continuous output (TUI, or JSON Lines with --json)
     #[arg(short, long)]
     watch: bool,
-
-    /// Output as JSON
+    /// Output a snapshot as JSON, including device and metric errors
     #[arg(short, long)]
     json: bool,
-
-    /// Refresh interval in milliseconds (default: 1000)
-    #[arg(short, long, default_value = "1000")]
+    /// Refresh interval in milliseconds (minimum 100)
+    #[arg(short, long, default_value = "1000", value_parser = clap::value_parser!(u64).range(app::MIN_INTERVAL_MS..))]
     interval: u64,
-
     #[command(subcommand)]
     command: Option<Commands>,
 }
 
-#[derive(Subcommand)]
+#[derive(Subcommand, Debug)]
 enum Commands {
-    /// Show GPU processes only
+    /// Show GPU processes only (retains GPU identity and errors in JSON)
     Processes,
 }
 
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
-
-    // Initialize tracing for debug logging
     tracing_subscriber::fmt()
+        .with_writer(std::io::stderr)
         .with_env_filter(
             tracing_subscriber::EnvFilter::from_default_env()
                 .add_directive(tracing::Level::WARN.into()),
         )
         .init();
-
-    // Initialize monitor
-    let monitor = match GpuMonitor::new() {
-        Ok(m) => m,
-        Err(e) => {
-            eprintln!("Error: Failed to initialize GPU monitor");
-            eprintln!("Make sure NVIDIA drivers are installed and you have an NVIDIA GPU.");
-            eprintln!("Details: {}", e);
-            std::process::exit(1);
-        }
-    };
-
-    // Handle subcommands
-    if let Some(cmd) = &cli.command {
-        match cmd {
-            Commands::Processes => {
-                return print_processes(&monitor, cli.json);
-            }
-        }
+    let mut monitor = MonitorService::new();
+    if matches!(cli.command, Some(Commands::Processes)) {
+        let snapshot = monitor.sample();
+        print_snapshot(&snapshot, cli.json, true)?;
+        return snapshot_result(&snapshot);
     }
-
-    // Handle output modes
-    if cli.once {
-        print_gpu_info(&monitor, cli.json)?;
+    if cli.once || (cli.json && !cli.watch) {
+        let snapshot = monitor.sample();
+        print_snapshot(&snapshot, cli.json, false)?;
+        snapshot_result(&snapshot)
     } else if cli.json {
-        // Continuous JSON stream if watch is set, otherwise once
-        if cli.watch {
-            run_json_watch(&monitor, cli.interval)?;
-        } else {
-            print_gpu_info(&monitor, true)?;
-        }
+        run_json_watch(&mut monitor, cli.interval)
     } else {
-        // Default or --watch: launch TUI
-        run_tui(&monitor, cli.interval)?;
+        let mut session = tui::init()?;
+        app::App::new(cli.interval).run(&mut session.terminal, &mut monitor)
     }
-
-    Ok(())
 }
 
-/// Print GPU info once
-fn print_gpu_info(monitor: &GpuMonitor, json: bool) -> anyhow::Result<()> {
-    let gpus = monitor.get_all_gpu_info()?;
-
-    if json {
-        println!("{}", serde_json::to_string_pretty(&gpus)?);
-    } else {
-        for gpu in &gpus {
-            println!("╭─────────────────────────────────────────────────────────────╮");
-            println!("│ GPU {}: {:<48} │", gpu.device.index, gpu.device.name);
-            println!("├─────────────────────────────────────────────────────────────┤");
-            println!(
-                "│ GPU Usage:    {:>3}%    Memory: {:>5.1}/{:.1} GiB ({:>3.0}%)        │",
-                gpu.metrics.gpu_utilization,
-                gpu.memory.used_gib(),
-                gpu.memory.total_gib(),
-                gpu.memory.usage_percent()
-            );
-            println!(
-                "│ Temperature:  {:>3}°C   Power:  {:>5.1}/{} W                    │",
-                gpu.metrics.temperature,
-                gpu.metrics.power_watts(),
-                gpu.device.power_limit
-            );
-            if let Some(fan) = gpu.metrics.fan_speed {
-                println!("│ Fan Speed:    {:>3}%                                          │", fan);
-            }
-            println!(
-                "│ Clocks:       Graphics {:>4} MHz  Memory {:>4} MHz          │",
-                gpu.metrics.clock_graphics, gpu.metrics.clock_memory
-            );
-
-            if !gpu.processes.is_empty() {
-                println!("├─────────────────────────────────────────────────────────────┤");
-                println!("│ Processes:                                                  │");
-                for proc in &gpu.processes {
-                    println!(
-                        "│   {:>6}  {:<30} {:>6} MiB  {:>5} │",
-                        proc.pid,
-                        truncate_str(&proc.name, 30),
-                        proc.gpu_memory_mib(),
-                        proc.process_type.short_label()
-                    );
-                }
-            }
-            println!("╰─────────────────────────────────────────────────────────────╯");
-        }
-    }
-
-    Ok(())
+#[derive(serde::Serialize)]
+struct ProcessSnapshot<'a> {
+    sampled_at_ms: u64,
+    gpus: Vec<ProcessGpu<'a>>,
+    failures: &'a [gpu_monitor_core::DeviceFailure],
+    error: &'a Option<gpu_monitor_core::SampleError>,
 }
 
-/// Print GPU processes only
-fn print_processes(monitor: &GpuMonitor, json: bool) -> anyhow::Result<()> {
-    let gpus = monitor.get_all_gpu_info()?;
+#[derive(serde::Serialize)]
+struct ProcessGpu<'a> {
+    device: ProcessDevice<'a>,
+    sampled_at_ms: u64,
+    processes: Vec<ProcessOutput<'a>>,
+    issues: &'a [gpu_monitor_core::MetricIssue],
+}
 
-    if json {
-        let all_processes: Vec<_> = gpus
+#[derive(serde::Serialize)]
+struct ProcessDevice<'a> {
+    index: u32,
+    uuid: &'a str,
+    name: &'a str,
+}
+
+#[derive(serde::Serialize)]
+struct ProcessOutput<'a> {
+    #[serde(flatten)]
+    process: &'a gpu_monitor_core::GpuProcess,
+    gpu_memory_mib: Option<u64>,
+}
+
+/// Machine-readable process output uses the same snapshot envelope and preserves errors.
+fn process_snapshot_json(snapshot: &MonitorSnapshot) -> ProcessSnapshot<'_> {
+    ProcessSnapshot {
+        sampled_at_ms: snapshot.sampled_at_ms,
+        gpus: snapshot
+            .gpus
             .iter()
-            .flat_map(|g| {
-                g.processes.iter().map(|p| {
-                    serde_json::json!({
-                        "gpu_index": g.device.index,
-                        "pid": p.pid,
-                        "name": p.name,
-                        "gpu_memory_mib": p.gpu_memory_mib(),
-                        "type": p.process_type
+            .map(|gpu| ProcessGpu {
+                device: ProcessDevice {
+                    index: gpu.device.index,
+                    uuid: &gpu.device.uuid,
+                    name: &gpu.device.name,
+                },
+                sampled_at_ms: gpu.sampled_at_ms,
+                processes: gpu
+                    .processes
+                    .iter()
+                    .map(|process| ProcessOutput {
+                        process,
+                        gpu_memory_mib: process.gpu_memory_mib(),
                     })
-                })
+                    .collect(),
+                issues: &gpu.issues,
             })
-            .collect();
-        println!("{}", serde_json::to_string_pretty(&all_processes)?);
-    } else {
-        println!("╭─────────────────────────────────────────────────────────────╮");
-        println!("│ GPU Processes                                               │");
-        println!("├───────┬────────┬────────────────────────────┬────────┬──────┤");
-        println!("│  GPU  │   PID  │ Name                       │ Memory │ Type │");
-        println!("├───────┼────────┼────────────────────────────┼────────┼──────┤");
-
-        for gpu in &gpus {
-            for proc in &gpu.processes {
-                println!(
-                    "│  {:>3}  │ {:>6} │ {:<26} │ {:>4} MB│ {:>4} │",
-                    gpu.device.index,
-                    proc.pid,
-                    truncate_str(&proc.name, 26),
-                    proc.gpu_memory_mib(),
-                    proc.process_type.short_label()
-                );
-            }
-        }
-        println!("╰───────┴────────┴────────────────────────────┴────────┴──────╯");
+            .collect(),
+        failures: &snapshot.failures,
+        error: &snapshot.error,
     }
+}
 
+fn print_snapshot(
+    snapshot: &MonitorSnapshot,
+    json: bool,
+    processes_only: bool,
+) -> anyhow::Result<()> {
+    if json {
+        let output = if processes_only {
+            serde_json::to_value(process_snapshot_json(snapshot))?
+        } else {
+            serde_json::to_value(snapshot)?
+        };
+        println!("{}", serde_json::to_string_pretty(&output)?);
+        return Ok(());
+    }
+    println!(
+        "GPU sample at {} ms since Unix epoch",
+        snapshot.sampled_at_ms
+    );
+    if let Some(error) = &snapshot.error {
+        println!("Monitor unavailable: {}", error.message);
+    }
+    for failure in &snapshot.failures {
+        println!(
+            "GPU {} unavailable: {}",
+            failure.index, failure.error.message
+        );
+    }
+    if snapshot.gpus.is_empty() && snapshot.failures.is_empty() && snapshot.error.is_none() {
+        println!("No GPU devices detected.");
+    }
+    for gpu in &snapshot.gpus {
+        println!(
+            "GPU {}: {} ({})",
+            gpu.device.index, gpu.device.name, gpu.device.uuid
+        );
+        if !processes_only {
+            println!(
+                "  GPU load: {} | {}",
+                ui::value(gpu.metrics.gpu_utilization, "%"),
+                ui::memory_label(gpu)
+            );
+            println!(
+                "  Temperature: {} | Power: {}/{} | Fan: {}",
+                ui::value(gpu.metrics.temperature, "°C"),
+                ui::value(
+                    gpu.metrics.power_watts().map(|power| format!("{power:.1}")),
+                    " W"
+                ),
+                ui::value(gpu.device.power_limit, " W"),
+                ui::value(gpu.metrics.fan_speed, "%")
+            );
+            println!(
+                "  Clocks: graphics {}, SM {}, memory {}",
+                ui::value(gpu.metrics.clock_graphics, " MHz"),
+                ui::value(gpu.metrics.clock_sm, " MHz"),
+                ui::value(gpu.metrics.clock_memory, " MHz")
+            );
+            println!(
+                "  Memory I/O: {} | Encoder: {} | Decoder: {}",
+                ui::value(gpu.metrics.memory_utilization, "%"),
+                ui::value(gpu.metrics.encoder_utilization, "%"),
+                ui::value(gpu.metrics.decoder_utilization, "%")
+            );
+        }
+        for issue in &gpu.issues {
+            println!("  Unavailable {}: {}", issue.metric, issue.error.message);
+        }
+        println!("  {:>8}  {:<30} {:>12}  Type", "PID", "Name", "GPU memory");
+        for process in &gpu.processes {
+            println!(
+                "  {:>8}  {:<30} {:>12}  {}",
+                process.pid,
+                truncate_str(&process.name, 30),
+                ui::value(process.gpu_memory_mib(), " MiB"),
+                process.process_type.short_label()
+            );
+        }
+    }
     Ok(())
 }
 
-/// Run continuous JSON output
-fn run_json_watch(monitor: &GpuMonitor, interval: u64) -> anyhow::Result<()> {
-    use std::time::Duration;
+fn snapshot_result(snapshot: &MonitorSnapshot) -> anyhow::Result<()> {
+    if let Some(error) = &snapshot.error {
+        anyhow::bail!("GPU sampling failed: {}", error.message);
+    }
+    if snapshot.gpus.is_empty() && !snapshot.failures.is_empty() {
+        anyhow::bail!("All GPU devices failed to report data");
+    }
+    Ok(())
+}
+
+fn run_json_watch(monitor: &mut MonitorService, interval: u64) -> anyhow::Result<()> {
     loop {
-        let gpus = monitor.get_all_gpu_info()?;
-        println!("{}", serde_json::to_string(&gpus)?);
-        std::thread::sleep(Duration::from_millis(interval));
+        println!("{}", serde_json::to_string(&monitor.sample())?);
+        std::thread::sleep(std::time::Duration::from_millis(interval));
     }
 }
 
-/// Run interactive TUI
-fn run_tui(monitor: &GpuMonitor, interval: u64) -> anyhow::Result<()> {
-    let mut terminal = tui::init()?;
-    let result = app::App::new(interval).run(&mut terminal, monitor);
-    tui::restore()?;
-    result
-}
-
-/// Truncate string to max length
-fn truncate_str(s: &str, max_len: usize) -> String {
-    if s.len() <= max_len {
-        s.to_string()
+fn truncate_str(text: &str, max_chars: usize) -> String {
+    if text.chars().count() <= max_chars {
+        text.into()
     } else {
-        format!("{}...", &s[..max_len - 3])
+        format!(
+            "{}…",
+            text.chars()
+                .take(max_chars.saturating_sub(1))
+                .collect::<String>()
+        )
     }
 }

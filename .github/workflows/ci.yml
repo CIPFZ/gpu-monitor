@@ -2,30 +2,53 @@ name: CI
 
 on:
   push:
-    branches: [ "main" ]
+    branches: [main]
   pull_request:
-    branches: [ "main" ]
+    branches: [main]
+
+permissions:
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
   check:
-    name: Check & Test
+    name: Test and package
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Install System Dependencies
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: crates/gpu-monitor-gui/src-web/package-lock.json
+      - uses: Swatinem/rust-cache@v2
+      - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential curl wget file libssl-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev
-
-      - name: Check Code
-        run: cargo check --workspace
-
-      - name: Run Tests
-        run: cargo test --workspace
+          sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential libssl-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev
+      - name: Test development launcher
+        run: python3 -m unittest discover -s tests -v
+      - name: Install frontend dependencies
+        working-directory: crates/gpu-monitor-gui/src-web
+        run: npm ci
+      - name: Test frontend
+        working-directory: crates/gpu-monitor-gui/src-web
+        run: npm test
+      - name: Check Rust formatting
+        run: cargo fmt --all -- --check
+      - name: Test workspace, including documentation and sampling worker
+        run: cargo test --workspace --locked
+      - name: Build GUI package through its configured frontend hook
+        working-directory: crates/gpu-monitor-gui
+        run: npx --yes --package @tauri-apps/cli@2.11.3 tauri build --debug --bundles deb --ci -- --locked
+      - name: Require package output
+        uses: actions/upload-artifact@v4
+        with:
+          name: gpu-monitor-gui-smoke-test
+          path: target/debug/bundle/deb/*.deb
+          if-no-files-found: error

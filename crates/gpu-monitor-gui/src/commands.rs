@@ -1,74 +1,56 @@
-//! Tauri IPC commands for GPU monitoring
+//! Tauri IPC reads cached samples and signals retries; it never calls NVML.
 
-use gpu_monitor_core::{GpuInfo, GpuMonitor};
+use crate::worker::SamplingWorker;
+use gpu_monitor_core::MonitorSnapshot;
 use serde::Serialize;
-use std::sync::Mutex;
 use tauri::State;
 
-/// Application state holding the GPU monitor instance
 pub struct AppState {
-    pub monitor: Mutex<Option<GpuMonitor>>,
+    worker: SamplingWorker,
 }
 
 impl Default for AppState {
     fn default() -> Self {
         Self {
-            monitor: Mutex::new(GpuMonitor::new().ok()),
+            worker: SamplingWorker::new(),
         }
     }
 }
 
-/// Error response for IPC commands
 #[derive(Debug, Serialize)]
 pub struct CommandError {
     pub message: String,
 }
 
-impl From<gpu_monitor_core::Error> for CommandError {
-    fn from(err: gpu_monitor_core::Error) -> Self {
-        Self {
-            message: err.to_string(),
-        }
+impl From<String> for CommandError {
+    fn from(message: String) -> Self {
+        Self { message }
     }
 }
 
-/// Get all GPU information
 #[tauri::command]
-pub fn get_gpu_info(state: State<AppState>) -> Result<Vec<GpuInfo>, CommandError> {
-    let guard = state.monitor.lock().map_err(|e| CommandError {
-        message: format!("Failed to acquire lock: {}", e),
-    })?;
-
-    match guard.as_ref() {
-        Some(monitor) => monitor.get_all_gpu_info().map_err(|e| e.into()),
-        None => Err(CommandError {
-            message: "GPU monitor not initialized. Make sure NVIDIA drivers are installed."
-                .to_string(),
-        }),
-    }
+pub fn get_gpu_info(state: State<AppState>) -> Result<MonitorSnapshot, CommandError> {
+    state.worker.latest().map_err(Into::into)
 }
 
-/// Get GPU count
+#[tauri::command]
+pub fn retry_gpu_monitor(state: State<AppState>) -> Result<(), CommandError> {
+    state.worker.retry().map_err(Into::into)
+}
+
 #[tauri::command]
 pub fn get_gpu_count(state: State<AppState>) -> Result<u32, CommandError> {
-    let guard = state.monitor.lock().map_err(|e| CommandError {
-        message: format!("Failed to acquire lock: {}", e),
-    })?;
-
-    match guard.as_ref() {
-        Some(monitor) => monitor.device_count().map_err(|e| e.into()),
-        None => Err(CommandError {
-            message: "GPU monitor not initialized".to_string(),
-        }),
+    let snapshot = state.worker.latest()?;
+    if let Some(error) = snapshot.error {
+        return Err(error.message.into());
     }
+    Ok((snapshot.gpus.len() + snapshot.failures.len()) as u32)
 }
 
-/// Check if GPU monitoring is available
 #[tauri::command]
 pub fn is_gpu_available(state: State<AppState>) -> bool {
-    let guard = state.monitor.lock();
-    match guard {
-        Ok(g) => g.is_some(),
-        Err(_) => false,
-    }
+    state
+        .worker
+        .latest()
+        .is_ok_and(|snapshot| !snapshot.gpus.is_empty())
 }

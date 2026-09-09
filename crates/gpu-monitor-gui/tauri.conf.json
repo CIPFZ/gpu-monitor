@@ -5,9 +5,16 @@
   "identifier": "com.gpumonitor.app",
   "build": {
     "frontendDist": "src-web/dist",
-    "devUrl": "http://localhost:5173",
-    "beforeDevCommand": null,
-    "beforeBuildCommand": null
+    "devUrl": "http://127.0.0.1:5173",
+    "beforeDevCommand": {
+      "script": "npm run dev -- --host 127.0.0.1",
+      "cwd": "src-web",
+      "wait": false
+    },
+    "beforeBuildCommand": {
+      "script": "npm run build",
+      "cwd": "src-web"
+    }
   },
   "app": {
     "windows": [

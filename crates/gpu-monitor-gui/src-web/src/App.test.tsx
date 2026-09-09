@@ -1,0 +1,71 @@
+import { act, fireEvent, render, screen, within } from '@testing-library/react';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { invoke } from '@tauri-apps/api/core';
+import App from './App';
+import { gpu, lost, snapshot, TIME } from './test/fixtures';
+vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
+const mockedInvoke = vi.mocked(invoke);
+beforeEach(() => { vi.useFakeTimers(); vi.setSystemTime(TIME); mockedInvoke.mockReset(); });
+afterEach(() => vi.useRealTimers());
+const flush = () => act(async () => {});
+const tick = () => act(async () => { await vi.advanceTimersByTimeAsync(1000); });
+
+describe('multi-GPU views (#11)', () => {
+    it('shows used/total/percentage for mixed capacities and opens any GPU full details', async () => {
+        mockedInvoke.mockResolvedValue(snapshot(TIME, [gpu(0), gpu(1)]));
+        render(<App />); await flush();
+        const second = screen.getByRole('article', { name: 'GPU 1: Test GPU 1' });
+        expect(within(second).getByText('8.0 / 48.0 GiB')).toBeInTheDocument();
+        expect(within(second).getByText('17% used')).toBeInTheDocument();
+        fireEvent.click(within(second).getByRole('button', { name: 'View Details' }));
+        expect(screen.getByLabelText('GPU details')).toHaveFocus();
+        expect(screen.getByText('Maximum Power Limit 350 W')).toBeInTheDocument();
+        expect(screen.getByText('7000 MHz')).toBeInTheDocument();
+        expect(screen.getByText('GPU-1')).toBeInTheDocument();
+        fireEvent.click(screen.getByRole('button', { name: '← All GPUs' }));
+        const first = screen.getByRole('article', { name: 'GPU 0: Test GPU 0' });
+        const processButton = within(first).getByRole('button', { name: 'View Processes (0)' });
+        processButton.focus();
+        fireEvent.click(processButton);
+        expect(screen.getByRole('dialog')).toHaveTextContent('GPU 0 · Test GPU 0');
+        fireEvent.click(screen.getByRole('button', { name: 'Close processes' }));
+        expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+        expect(processButton).toHaveFocus();
+    });
+    it('renders unavailable readings and process errors honestly (#2)', async () => {
+        const card = gpu();
+        card.metrics.temperature = null; card.memory = null; card.device.power_limit = null;
+        card.processes = [{ pid: 9, name: 'worker', gpu_memory: null, process_type: 'Compute' }];
+        card.issues = [{ metric: 'processes_graphics', error: { kind: 'permission_denied', message: 'Permission denied' } }];
+        mockedInvoke.mockResolvedValue(snapshot(TIME, [card])); render(<App />); await flush();
+        expect(screen.getAllByText('N/A').length).toBeGreaterThanOrEqual(3);
+        expect(screen.getByText('Power Limit N/A')).toBeInTheDocument();
+        expect(screen.getByText(/Process data is incomplete/)).toBeInTheDocument();
+        expect(screen.queryByText(/No active processes/)).not.toBeInTheDocument();
+        fireEvent.change(screen.getByRole('searchbox', { name: 'Search processes' }), { target: { value: 'missing' } });
+        expect(screen.getByText('Process list unavailable or incomplete')).toBeInTheDocument();
+    });
+});
+describe('history survives presentation changes (#3/#8)', () => {
+    it('keeps samples while filtering and retains cards/history through failures and recovery', async () => {
+        let current = snapshot(TIME, [gpu(0), gpu(1)]);
+        mockedInvoke.mockImplementation(() => Promise.resolve(current) as ReturnType<typeof invoke>);
+        render(<App />); await flush();
+        fireEvent.change(screen.getByRole('searchbox', { name: 'Filter GPUs' }), { target: { value: 'GPU-1' } });
+        current = snapshot(TIME + 1000, [gpu(0, TIME + 1000), gpu(1, TIME + 1000)]); await tick();
+        fireEvent.change(screen.getByRole('searchbox', { name: 'Filter GPUs' }), { target: { value: '' } });
+        const chart = () => within(screen.getByRole('article', { name: 'GPU 0: Test GPU 0' })).getByRole('img', { name: 'GPU load over the last 60 seconds' }).querySelector('path')!.getAttribute('d')!;
+        expect(chart().match(/L/g)).toHaveLength(1);
+        current = snapshot(TIME + 2000, [gpu(1, TIME + 2000)]);
+        current.failures = [{ index: 0, uuid: 'GPU-0', error: lost }]; await tick();
+        expect(screen.getAllByRole('article')).toHaveLength(2);
+        expect(screen.getByText(/GPU fell off the bus/)).toBeInTheDocument();
+        current = snapshot(TIME + 3000, [], lost); await tick();
+        expect(screen.getAllByRole('article')).toHaveLength(2);
+        expect(screen.getByRole('button', { name: 'Retry' })).toBeInTheDocument();
+        current = snapshot(TIME + 4000, [gpu(0, TIME + 4000), gpu(1, TIME + 4000)]); await tick();
+        expect(chart().match(/M/g)).toHaveLength(2);
+        expect(chart().match(/L/g)).toHaveLength(1);
+        expect(screen.getByRole('status')).toHaveTextContent('Live');
+    });
+});
