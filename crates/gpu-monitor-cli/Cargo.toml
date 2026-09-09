@@ -18,3 +18,8 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 serde_json = { workspace = true }
 serde = { workspace = true }
+gpu-monitor-runtime = { path = "../gpu-monitor-runtime" }
+ctrlc = { version = "3.4", features = ["termination"] }
+
+[dev-dependencies]
+tempfile = "3"

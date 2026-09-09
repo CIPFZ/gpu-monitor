@@ -5,13 +5,14 @@ use crate::{
     MemoryInfo, MetricIssue, ProcessType, SampleError,
 };
 use nvml_wrapper::{
-    enum_wrappers::device::{Clock, TemperatureSensor},
+    bitmasks::device::ThrottleReasons,
+    enum_wrappers::device::{Clock, PcieUtilCounter, PerformanceState, TemperatureSensor},
     enums::device::UsedGpuMemory,
     error::NvmlError,
     struct_wrappers::device::ProcessInfo,
     Nvml,
 };
-use std::{collections::HashMap, fs};
+use std::collections::HashMap;
 
 pub(crate) struct NvmlBackend {
     nvml: Nvml,
@@ -159,6 +160,33 @@ impl Backend for NvmlBackend {
                 &mut issues,
             ),
             clock_sm: read_metric("clock_sm", device.clock_info(Clock::SM), &mut issues),
+            performance_state: read_metric(
+                "performance_state",
+                device.performance_state().and_then(performance_state_name),
+                &mut issues,
+            ),
+            throttle_reasons: read_metric(
+                "throttle_reasons",
+                device.current_throttle_reasons_strict(),
+                &mut issues,
+            )
+            .map(throttle_reason_names),
+            pcie_generation: read_metric(
+                "pcie_generation",
+                device.current_pcie_link_gen(),
+                &mut issues,
+            ),
+            pcie_width: read_metric("pcie_width", device.current_pcie_link_width(), &mut issues),
+            pcie_rx_kb_per_second: read_metric(
+                "pcie_rx_kb_per_second",
+                device.pcie_throughput(PcieUtilCounter::Receive),
+                &mut issues,
+            ),
+            pcie_tx_kb_per_second: read_metric(
+                "pcie_tx_kb_per_second",
+                device.pcie_throughput(PcieUtilCounter::Send),
+                &mut issues,
+            ),
         };
         let mut processes = Vec::new();
         append_processes(
@@ -173,6 +201,7 @@ impl Backend for NvmlBackend {
             &mut processes,
             &mut issues,
         );
+        crate::process_metadata::enrich_processes(&mut processes);
         processes.sort_by(|a, b| {
             b.gpu_memory
                 .cmp(&a.gpu_memory)
@@ -245,18 +274,48 @@ fn append_processes(
         } else {
             processes.push(GpuProcess {
                 pid: process.pid,
-                name: process_name(process.pid).unwrap_or_else(|| "unknown".into()),
+                name: "unknown".into(),
                 gpu_memory: memory,
                 process_type,
+                ..Default::default()
             });
         }
     }
 }
 
-fn process_name(pid: u32) -> Option<String> {
-    fs::read_to_string(format!("/proc/{pid}/comm"))
-        .ok()
-        .map(|value| value.trim().to_owned())
+fn performance_state_name(state: PerformanceState) -> Result<String, NvmlError> {
+    if state == PerformanceState::Unknown {
+        Err(NvmlError::Unknown)
+    } else {
+        Ok(format!("P{}", state.as_c()))
+    }
+}
+
+fn throttle_reason_names(reasons: ThrottleReasons) -> Vec<String> {
+    [
+        (ThrottleReasons::GPU_IDLE, "gpu_idle"),
+        (
+            ThrottleReasons::APPLICATIONS_CLOCKS_SETTING,
+            "applications_clocks_setting",
+        ),
+        (ThrottleReasons::SW_POWER_CAP, "sw_power_cap"),
+        (ThrottleReasons::HW_SLOWDOWN, "hw_slowdown"),
+        (ThrottleReasons::SYNC_BOOST, "sync_boost"),
+        (ThrottleReasons::SW_THERMAL_SLOWDOWN, "sw_thermal_slowdown"),
+        (ThrottleReasons::HW_THERMAL_SLOWDOWN, "hw_thermal_slowdown"),
+        (
+            ThrottleReasons::HW_POWER_BRAKE_SLOWDOWN,
+            "hw_power_brake_slowdown",
+        ),
+        (
+            ThrottleReasons::DISPLAY_CLOCK_SETTING,
+            "display_clock_setting",
+        ),
+    ]
+    .into_iter()
+    .filter(|(flag, _)| reasons.contains(*flag))
+    .map(|(_, name)| name.to_owned())
+    .collect()
 }
 
 #[cfg(test)]
@@ -342,6 +401,44 @@ mod tests {
         assert_eq!(processes.len(), 1);
         assert_eq!(processes[0].process_type, ProcessType::Mixed);
         assert_eq!(processes[0].gpu_memory_mib(), Some(2));
+    }
+
+    #[test]
+    fn performance_states_use_nvml_numbers_and_unknown_is_unavailable() {
+        assert_eq!(
+            performance_state_name(PerformanceState::Zero).unwrap(),
+            "P0"
+        );
+        assert_eq!(
+            performance_state_name(PerformanceState::Fifteen).unwrap(),
+            "P15"
+        );
+        assert!(performance_state_name(PerformanceState::Unknown).is_err());
+    }
+
+    #[test]
+    fn active_throttle_reasons_are_distinct_from_unavailable() {
+        assert!(throttle_reason_names(ThrottleReasons::NONE).is_empty());
+        assert_eq!(
+            throttle_reason_names(
+                ThrottleReasons::SW_POWER_CAP | ThrottleReasons::SW_THERMAL_SLOWDOWN
+            ),
+            ["sw_power_cap", "sw_thermal_slowdown"]
+        );
+        let mut issues = Vec::new();
+        assert_eq!(
+            read_metric("pcie_rx_kb_per_second", Ok(1234), &mut issues),
+            Some(1234)
+        );
+        assert_eq!(
+            read_metric(
+                "throttle_reasons",
+                Err::<ThrottleReasons, _>(NvmlError::NotSupported),
+                &mut issues
+            ),
+            None
+        );
+        assert_eq!(issues[0].metric, "throttle_reasons");
     }
 
     #[test]

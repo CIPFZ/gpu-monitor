@@ -12,5 +12,7 @@ tauri-build = { workspace = true, features = [] }
 
 [dependencies]
 gpu-monitor-core = { path = "../gpu-monitor-core" }
+gpu-monitor-runtime = { path = "../gpu-monitor-runtime" }
+notify-rust = "4"
 tauri = { workspace = true, features = ["tray-icon"] }
 serde = { workspace = true }

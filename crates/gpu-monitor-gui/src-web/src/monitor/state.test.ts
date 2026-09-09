@@ -4,18 +4,22 @@ import { gpu, lost, snapshot, TIME } from '../test/fixtures';
 import { initialState, monitorReducer, monitorStatus } from './state';
 
 describe('sample history (#3)', () => {
-    it('records every stable sample, deduplicates cached timestamps, and rejects old snapshots', () => {
+    it('records stable samples, deduplicates cache, and resets the time axis after clock rollback', () => {
         let state = initialState;
         for (let second = 0; second < 5; second++) state = monitorReducer(state, { type: 'snapshot', snapshot: snapshot(TIME + second * 1000) });
         expect(state.devices['GPU-0'].history.map(point => point.load)).toEqual([50, 50, 50, 50, 50]);
         state = monitorReducer(state, { type: 'snapshot', snapshot: snapshot(TIME + 4000) });
-        state = monitorReducer(state, { type: 'snapshot', snapshot: snapshot(TIME) });
         expect(state.devices['GPU-0'].history).toHaveLength(5);
         expect(state.devices['GPU-0'].gpu.sampled_at_ms).toBe(TIME + 4000);
+        expect(monitorStatus(state, TIME)).toBe('Stale');
+        state = monitorReducer(state, { type: 'snapshot', snapshot: snapshot(TIME) });
+        expect(state.devices['GPU-0'].gpu.sampled_at_ms).toBe(TIME);
+        expect(state.devices['GPU-0'].history).toHaveLength(1);
+        expect(monitorStatus(state, TIME)).toBe('Live');
     });
     it('bounds history by elapsed time instead of value changes or sample count', () => {
         let state = monitorReducer(initialState, { type: 'snapshot', snapshot: snapshot() });
-        state = monitorReducer(state, { type: 'snapshot', snapshot: snapshot(TIME + 61000) });
+        state = monitorReducer(state, { type: 'snapshot', snapshot: snapshot(TIME + 3_600_001) });
         expect(state.devices['GPU-0'].history).toHaveLength(1);
     });
     it('uses actual timestamp positions and breaks paths on unknown samples and long gaps', () => {
@@ -60,6 +64,7 @@ describe('device isolation and recovery (#8)', () => {
         expect(monitorStatus(offline, TIME)).toBe('Offline');
         const live = monitorReducer(initialState, { type: 'snapshot', snapshot: snapshot() });
         expect(monitorStatus(live, TIME)).toBe('Live');
+        expect(monitorStatus(live, TIME - 50)).toBe('Live'); // Clock tick may precede IPC by a few milliseconds.
         expect(monitorStatus(live, TIME + 3001)).toBe('Stale');
     });
 });

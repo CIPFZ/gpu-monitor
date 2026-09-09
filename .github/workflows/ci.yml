@@ -43,6 +43,10 @@ jobs:
         run: cargo fmt --all -- --check
       - name: Test workspace, including documentation and sampling worker
         run: cargo test --workspace --locked
+      - name: Check generated data contracts
+        run: |
+          cargo run -p gpu-monitor-core --locked --features typescript --example generate_types -- --check
+          cargo run -p gpu-monitor-runtime --locked --features typescript --example generate_runtime_types -- --check
       - name: Build GUI package through its configured frontend hook
         working-directory: crates/gpu-monitor-gui
         run: npx --yes --package @tauri-apps/cli@2.11.3 tauri build --debug --bundles deb --ci -- --locked

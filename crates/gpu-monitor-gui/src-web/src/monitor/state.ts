@@ -2,6 +2,7 @@ import { DeviceFailure, GpuInfo, MonitorSnapshot, SampleError, memoryPercent } f
 
 export const HISTORY_WINDOW_MS = 60_000;
 export const STALE_AFTER_MS = 3_000;
+export const MAX_HISTORY_MS = 3_600_000;
 export interface HistoryPoint { at: number; load: number | null; memory: number | null }
 export interface DeviceState { gpu: GpuInfo; history: HistoryPoint[]; failure: SampleError | null }
 export interface MonitorState {
@@ -12,7 +13,7 @@ export interface MonitorState {
     failures: DeviceFailure[];
 }
 export const initialState: MonitorState = {
-    devices: {}, sampledAt: 0, received: false, error: null, failures: [],
+    devices: Object.create(null), sampledAt: 0, received: false, error: null, failures: [],
 };
 export type MonitorAction =
     | { type: 'snapshot'; snapshot: MonitorSnapshot }
@@ -21,7 +22,7 @@ export type MonitorAction =
 function append(history: HistoryPoint[], point: HistoryPoint): HistoryPoint[] {
     // Cached snapshots and React StrictMode may deliver the same sample twice.
     if (history.length && point.at <= history[history.length - 1].at) return history;
-    return [...history.filter(item => item.at >= point.at - HISTORY_WINDOW_MS), point];
+    return [...history.filter(item => item.at >= point.at - MAX_HISTORY_MS), point].slice(-36_001);
 }
 export function monitorReducer(state: MonitorState, action: MonitorAction): MonitorState {
     if (action.type === 'error') {
@@ -31,8 +32,10 @@ export function monitorReducer(state: MonitorState, action: MonitorAction): Moni
         return { ...state, devices, received: true, error: action.error };
     }
     const snapshot = action.snapshot;
-    if (snapshot.sampled_at_ms < state.sampledAt) return state;
-    const devices = { ...state.devices };
+    // Requests are single-flight and ordered. A lower wall-clock timestamp is
+    // a clock adjustment, not an out-of-order response; restart the time axis.
+    if (snapshot.sampled_at_ms < state.sampledAt) return monitorReducer(initialState, action);
+    const devices: MonitorState['devices'] = Object.assign(Object.create(null), state.devices);
     const successful = new Set(snapshot.gpus.map(gpu => gpu.device.uuid));
     for (const [uuid, entry] of Object.entries(devices)) {
         if (successful.has(uuid)) continue;
@@ -56,14 +59,14 @@ export function monitorReducer(state: MonitorState, action: MonitorAction): Moni
     }
     return { devices, sampledAt: snapshot.sampled_at_ms, received: true, error: snapshot.error, failures: snapshot.failures };
 }
-export function isDeviceStale(entry: DeviceState, state: MonitorState, now: number): boolean {
-    return !!(state.error || entry.failure) || now - entry.gpu.sampled_at_ms > STALE_AFTER_MS;
+export function isDeviceStale(entry: DeviceState, state: MonitorState, now: number, intervalMs = 1000): boolean {
+    return !!(state.error || entry.failure) || Math.abs(now - entry.gpu.sampled_at_ms) > Math.max(STALE_AFTER_MS, intervalMs * 3);
 }
-export function monitorStatus(state: MonitorState, now: number): 'Connecting' | 'Offline' | 'Stale' | 'Live' {
+export function monitorStatus(state: MonitorState, now: number, intervalMs = 1000): 'Connecting' | 'Offline' | 'Stale' | 'Live' {
     if (!state.received) return 'Connecting';
     const entries = Object.values(state.devices);
     if (!entries.length && (state.error || state.failures.length)) return 'Offline';
-    if (state.error || state.failures.length || now - state.sampledAt > STALE_AFTER_MS ||
-        entries.some(entry => isDeviceStale(entry, state, now))) return 'Stale';
+    if (state.error || state.failures.length || now - state.sampledAt > Math.max(STALE_AFTER_MS, intervalMs * 3) ||
+        entries.some(entry => isDeviceStale(entry, state, now, intervalMs))) return 'Stale';
     return 'Live';
 }

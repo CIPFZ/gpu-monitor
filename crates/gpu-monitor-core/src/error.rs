@@ -4,6 +4,7 @@ use thiserror::Error;
 
 /// Stable error categories shared by JSON, CLI and GUI clients.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
 #[serde(rename_all = "snake_case")]
 pub enum ErrorKind {
     NotSupported,
@@ -15,6 +16,7 @@ pub enum ErrorKind {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, Error)]
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
 #[error("{message}")]
 pub struct SampleError {
     pub kind: ErrorKind,

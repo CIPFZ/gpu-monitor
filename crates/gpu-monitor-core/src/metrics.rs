@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 
 /// Real-time GPU metrics
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
 pub struct GpuMetrics {
     /// GPU utilization percentage (0-100)
     pub gpu_utilization: Option<u32>,
@@ -25,6 +26,23 @@ pub struct GpuMetrics {
     pub clock_memory: Option<u32>,
     /// Current SM clock in MHz
     pub clock_sm: Option<u32>,
+    /// NVML performance state, P0 (highest performance) through P15.
+    #[serde(default)]
+    pub performance_state: Option<String>,
+    /// Active NVML clock-limiting reasons. Empty means no reason is active.
+    #[serde(default)]
+    pub throttle_reasons: Option<Vec<String>>,
+    /// Currently negotiated PCIe generation and lane count.
+    #[serde(default)]
+    pub pcie_generation: Option<u32>,
+    #[serde(default)]
+    pub pcie_width: Option<u32>,
+    /// PCIe receive throughput in NVML's documented KB/s, over a 20 ms window.
+    #[serde(default)]
+    pub pcie_rx_kb_per_second: Option<u32>,
+    /// PCIe transmit throughput in NVML's documented KB/s, over a 20 ms window.
+    #[serde(default)]
+    pub pcie_tx_kb_per_second: Option<u32>,
 }
 
 impl GpuMetrics {
@@ -56,6 +74,7 @@ impl GpuMetrics {
 
 /// Temperature status categories
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
 pub enum TemperatureStatus {
     /// Below 50°C
     Cool,

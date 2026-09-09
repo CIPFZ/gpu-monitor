@@ -1,0 +1,21 @@
+[package]
+name = "gpu-monitor-runtime"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+typescript = ["dep:ts-rs", "gpu-monitor-core/typescript"]
+
+[[example]]
+name = "generate_runtime_types"
+required-features = ["typescript"]
+
+[dependencies]
+gpu-monitor-core = { path = "../gpu-monitor-core" }
+serde.workspace = true
+serde_json.workspace = true
+ts-rs = { version = "11", optional = true }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

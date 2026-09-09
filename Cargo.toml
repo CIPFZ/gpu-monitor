@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/gpu-monitor-core",
+    "crates/gpu-monitor-runtime",
     "crates/gpu-monitor-cli",
     "crates/gpu-monitor-gui",
 ]

@@ -79,6 +79,7 @@ impl MonitorService {
     pub fn sample(&mut self) -> MonitorSnapshot {
         let (now, sampled_at_ms) = (self.clock)();
         let mut snapshot = MonitorSnapshot {
+            schema_version: crate::SCHEMA_VERSION,
             sampled_at_ms,
             gpus: Vec::new(),
             failures: Vec::new(),

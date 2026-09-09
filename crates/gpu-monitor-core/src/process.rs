@@ -3,16 +3,35 @@
 use serde::{Deserialize, Serialize};
 
 /// Information about a process using the GPU
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
 pub struct GpuProcess {
     /// Process ID
     pub pid: u32,
     /// Process name (executable name)
     pub name: String,
     /// GPU memory used by this process in bytes
+    #[cfg_attr(feature = "typescript", ts(type = "number | null"))]
     pub gpu_memory: Option<u64>,
     /// Process type
     pub process_type: ProcessType,
+    /// Local account name from /etc/passwd; remote-only accounts retain the UID.
+    #[serde(default)]
+    pub user: Option<String>,
+    /// Real UID reported by the operating system.
+    #[serde(default)]
+    pub uid: Option<u32>,
+    /// Argument boundaries are preserved; restricted or over-1-MiB values are unknown.
+    #[serde(default)]
+    pub command: Option<Vec<String>>,
+    /// Unix start time in milliseconds. Combine with PID to identify a process.
+    #[serde(default)]
+    #[cfg_attr(feature = "typescript", ts(type = "number | null"))]
+    pub started_at_ms: Option<u64>,
+    /// Age at sampling time, measured against system uptime.
+    #[serde(default)]
+    #[cfg_attr(feature = "typescript", ts(type = "number | null"))]
+    pub elapsed_seconds: Option<u64>,
 }
 
 impl GpuProcess {
@@ -23,7 +42,8 @@ impl GpuProcess {
 }
 
 /// Type of GPU process
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
 pub enum ProcessType {
     /// Graphics/rendering process
     Graphics,
@@ -32,6 +52,7 @@ pub enum ProcessType {
     /// Both graphics and compute
     Mixed,
     /// Unknown process type
+    #[default]
     Unknown,
 }
 

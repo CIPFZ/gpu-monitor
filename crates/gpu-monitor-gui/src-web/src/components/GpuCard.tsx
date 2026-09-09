@@ -11,11 +11,13 @@ interface GpuCardProps {
     stale: boolean;
     mode?: 'compact' | 'expanded';
     onDetails?: () => void;
+    windowMs?: number;
+    intervalMs?: number;
 }
 function measurement(value: number | null, unit: string, divisor = 1): string {
     return value === null ? 'N/A' : `${(value / divisor).toFixed(0)}${unit}`;
 }
-export default function GpuCard({ entry, now, stale, mode = 'compact', onDetails }: GpuCardProps) {
+export default function GpuCard({ entry, now, stale, mode = 'compact', onDetails, windowMs, intervalMs }: GpuCardProps) {
     const { gpu, history, failure } = entry;
     const { device, metrics, memory } = gpu;
     const expanded = mode === 'expanded';
@@ -33,6 +35,12 @@ export default function GpuCard({ entry, now, stale, mode = 'compact', onDetails
             ['Memory I/O Busy', measurement(metrics.memory_utilization, '%')],
             ['Encoder Busy', measurement(metrics.encoder_utilization, '%')],
             ['Decoder Busy', measurement(metrics.decoder_utilization, '%')],
+            ['Performance State', metrics.performance_state ?? 'N/A'],
+            ['Clock Limit Reasons', metrics.throttle_reasons?.join(', ') || (metrics.throttle_reasons ? 'None reported' : 'N/A')],
+            ['PCIe Generation', measurement(metrics.pcie_generation, '')],
+            ['PCIe Width', measurement(metrics.pcie_width, ' lanes')],
+            ['PCIe Receive', measurement(metrics.pcie_rx_kb_per_second, ' KB/s')],
+            ['PCIe Transmit', measurement(metrics.pcie_tx_kb_per_second, ' KB/s')],
         ] : []),
     ];
     return <article className={expanded ? 'gpu-expanded' : 'gpu-card'} aria-label={`GPU ${device.index}: ${device.name}`}>
@@ -69,7 +77,7 @@ export default function GpuCard({ entry, now, stale, mode = 'compact', onDetails
                     {metric === 'memory' && <span className="metric-unit-small">{measurement(percent, '%')} used</span>}
                 </div>
                 <div className={expanded ? 'chart-container-large' : 'metric-chart'}>
-                    <Sparkline history={history} metric={metric} now={now}
+                    <Sparkline history={history} metric={metric} now={now} windowMs={windowMs} intervalMs={intervalMs}
                         color={metric === 'load' ? 'var(--accent-blue)' : 'var(--accent-purple)'} height={expanded ? 120 : 40} />
                 </div>
             </div>)}

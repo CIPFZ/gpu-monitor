@@ -5,11 +5,12 @@ use ratatui::{
     layout::{Constraint, Layout, Rect},
     style::{Color, Modifier, Style},
     text::Line,
-    widgets::{Block, Borders, Paragraph, Row, Sparkline, Table, Wrap},
+    widgets::{Block, Borders, Paragraph, Row, Sparkline, Table, TableState, Wrap},
     Frame,
 };
 
 use crate::app::{App, DeviceView, HistoryPoint};
+use crate::output::{diagnostics_text, elapsed, process_owner, safe_lines, safe_text};
 
 pub fn draw(frame: &mut Frame, app: &mut App) {
     let chunks = Layout::vertical([
@@ -19,7 +20,8 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     ])
     .split(frame.area());
     let header = format!(
-        " GPU Monitor | Device {}/{} | {} failed | Sample {} ms",
+        " GPU Monitor | {} | Device {}/{} | {} failed | {}s history",
+        app.source_label,
         if app.device_count() == 0 {
             0
         } else {
@@ -27,24 +29,93 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         },
         app.device_count(),
         app.failure_count,
-        app.sampled_at_ms
+        app.history_window_ms / 1000
     );
     frame.render_widget(
         Paragraph::new(header).style(Style::default().fg(Color::Cyan)),
         chunks[0],
     );
     frame.render_widget(
-        Paragraph::new("←/→ Tab GPU | ↑/↓ PgUp/PgDn scroll | Home/End | r retry | q/Ctrl-C quit"),
+        Paragraph::new(
+            "←/→ GPU | ↑/↓ scroll | t overview | d diagnostics | a alerts | r retry | q quit",
+        ),
         chunks[2],
     );
+
+    if app.diagnostics || app.show_events {
+        let text = if app.diagnostics {
+            app.latest_snapshot
+                .as_ref()
+                .map(diagnostics_text)
+                .unwrap_or_else(|| {
+                    app.error
+                        .clone()
+                        .unwrap_or_else(|| "Waiting for the first sample".into())
+                })
+        } else if app.events.is_empty() {
+            "No alert events. Enable monitoring with --alerts or the alerts command.
+Alerts use sustained thresholds and separate recovery limits."
+                .into()
+        } else {
+            app.events
+                .iter()
+                .rev()
+                .map(|event| {
+                    format!(
+                        "{} {:?} {:?} {}: {}",
+                        event.at_ms,
+                        event.kind,
+                        event.state,
+                        event.gpu_uuid.as_deref().unwrap_or("monitor"),
+                        safe_text(&event.message)
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        let block = Block::bordered().title(if app.diagnostics {
+            "Diagnostics · d to return"
+        } else {
+            "Alert events · a to return"
+        });
+        let inner = block.inner(chunks[1]);
+        let lines = text
+            .lines()
+            .map(|line| {
+                line.chars()
+                    .count()
+                    .max(1)
+                    .div_ceil(inner.width.max(1) as usize)
+            })
+            .sum();
+        app.set_panel_viewport(lines, inner.height);
+        frame.render_widget(
+            Paragraph::new(safe_lines(&text))
+                .block(block)
+                .wrap(Wrap { trim: false })
+                .scroll((app.panel_scroll, 0)),
+            chunks[1],
+        );
+        app.set_process_viewport(0);
+        return;
+    }
+    if app.overview {
+        draw_overview(frame, chunks[1], app);
+        app.set_process_viewport(0);
+        return;
+    }
 
     let Some(view) = app.selected_view() else {
         let message = app
             .error
             .as_deref()
-            .unwrap_or("No GPU devices detected. Retrying automatically; r retries now.");
+            .unwrap_or(if app.selection.has_device_filter() {
+                "No GPUs match the current filters. Monitoring continues."
+            } else {
+                "No GPU devices detected. Retrying automatically; r retries now."
+            });
         frame.render_widget(
-            Paragraph::new(message)
+            Paragraph::new(safe_text(message))
                 .wrap(Wrap { trim: true })
                 .style(Style::default().fg(Color::Yellow))
                 .block(Block::bordered().title("GPU Monitor")),
@@ -55,7 +126,13 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     };
     let title = view.gpu.as_ref().map_or_else(
         || format!(" GPU {} ", view.index),
-        |gpu| format!(" GPU {}: {} ", gpu.device.index, gpu.device.name),
+        |gpu| {
+            format!(
+                " GPU {}: {} ",
+                gpu.device.index,
+                safe_text(&gpu.device.name)
+            )
+        },
     );
     let block = Block::bordered()
         .title(title)
@@ -110,10 +187,14 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         frame,
         sections[1],
         format!(
-            "GPU load: {} | recent samples; × = missing",
-            value(gpu_value, "%")
+            "GPU load: {} | {}s; × = missing",
+            value(gpu_value, "%"),
+            app.history_window_ms / 1000
         ),
         &view.history,
+        app.now_ms,
+        app.history_window_ms,
+        app.sample_interval_ms,
         |point| point.gpu,
         Color::Green,
     );
@@ -122,12 +203,24 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         sections[2],
         memory_title,
         &view.history,
+        app.now_ms,
+        app.history_window_ms,
+        app.sample_interval_ms,
         |point| point.memory,
         Color::Cyan,
     );
 
+    let stale = app.is_stale(view);
     let status = if let Some(error) = &view.error {
         format!("STALE / unavailable: {error}. Retrying automatically; r retries now.")
+    } else if stale {
+        format!(
+            "STALE: last successful sample {} ms. {}",
+            view.gpu.as_ref().map_or(0, |gpu| gpu.sampled_at_ms),
+            app.error
+                .as_deref()
+                .unwrap_or("Waiting for the sampler; r retries now.")
+        )
     } else if let Some(gpu) = &view.gpu {
         if let Some(issue) = gpu.issues.first() {
             format!(
@@ -137,18 +230,17 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
                 issue.error.message
             )
         } else {
-            "Live | Charts show the latest visible samples; capacity differs from memory I/O activity.".into()
+            "Live | Time buckets retain peaks; × marks missing data. d diagnostics · a alerts"
+                .into()
         }
     } else {
         "Waiting for a successful sample.".into()
     };
     frame.render_widget(
-        Paragraph::new(status)
+        Paragraph::new(safe_lines(&status))
             .wrap(Wrap { trim: true })
             .style(Style::default().fg(
-                if view.error.is_some()
-                    || view.gpu.as_ref().is_some_and(|gpu| !gpu.issues.is_empty())
-                {
+                if stale || view.gpu.as_ref().is_some_and(|gpu| !gpu.issues.is_empty()) {
                     Color::Yellow
                 } else {
                     Color::DarkGray
@@ -156,7 +248,14 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
             )),
         sections[3],
     );
-    draw_processes(frame, sections[4], view, visible_rows);
+    draw_processes(
+        frame,
+        sections[4],
+        view,
+        visible_rows,
+        stale,
+        app.selection.include_command,
+    );
 }
 
 pub fn value<T: std::fmt::Display>(value: Option<T>, suffix: &str) -> String {
@@ -209,17 +308,22 @@ fn draw_history(
     area: Rect,
     title: String,
     history: &std::collections::VecDeque<HistoryPoint>,
+    now_ms: u64,
+    window_ms: u64,
+    sample_interval_ms: u64,
     metric: fn(&HistoryPoint) -> Option<u64>,
     color: Color,
 ) {
     let block = Block::default().title(title);
     let width = block.inner(area).width as usize;
-    // Sparkline reads from the start of its input; slice the *tail* to keep newest data visible.
-    let samples: Vec<Option<u64>> = history
-        .iter()
-        .skip(history.len().saturating_sub(width))
-        .map(metric)
-        .collect();
+    let samples = time_buckets(
+        history,
+        now_ms,
+        window_ms,
+        sample_interval_ms,
+        width,
+        metric,
+    );
     let chart = Sparkline::default()
         .block(block)
         .data(samples)
@@ -230,7 +334,14 @@ fn draw_history(
     frame.render_widget(chart, area);
 }
 
-fn draw_processes(frame: &mut Frame, area: Rect, view: &DeviceView, visible_rows: usize) {
+fn draw_processes(
+    frame: &mut Frame,
+    area: Rect,
+    view: &DeviceView,
+    visible_rows: usize,
+    stale: bool,
+    include_command: bool,
+) {
     let count = view.process_count();
     let first = if count == 0 || visible_rows == 0 {
         0
@@ -243,7 +354,7 @@ fn draw_processes(frame: &mut Frame, area: Rect, view: &DeviceView, visible_rows
             .iter()
             .any(|issue| issue.metric.contains("process"))
     });
-    let label = if view.error.is_some() {
+    let label = if stale {
         " STALE"
     } else if unavailable {
         " incomplete/N/A"
@@ -263,7 +374,22 @@ fn draw_processes(frame: &mut Frame, area: Rect, view: &DeviceView, visible_rows
         .map(|process| {
             Row::new(vec![
                 process.pid.to_string(),
-                process.name.clone(),
+                process_owner(process),
+                elapsed(process.elapsed_seconds),
+                if include_command {
+                    process
+                        .command
+                        .as_ref()
+                        .map(|args| {
+                            args.iter()
+                                .map(|arg| safe_text(arg))
+                                .collect::<Vec<_>>()
+                                .join(" ")
+                        })
+                        .unwrap_or_else(|| safe_text(&process.name))
+                } else {
+                    safe_text(&process.name)
+                },
                 value(process.gpu_memory_mib(), " MiB"),
                 process.process_type.short_label().into(),
             ])
@@ -272,14 +398,28 @@ fn draw_processes(frame: &mut Frame, area: Rect, view: &DeviceView, visible_rows
     let table = Table::new(
         rows,
         [
+            Constraint::Length(7),
+            Constraint::Length(10),
             Constraint::Length(8),
             Constraint::Min(8),
-            Constraint::Length(12),
+            Constraint::Length(10),
             Constraint::Length(5),
         ],
     )
     .header(
-        Row::new(["PID", "Name", "GPU memory", "Type"]).style(
+        Row::new([
+            "PID",
+            "User",
+            "Elapsed",
+            if include_command {
+                "Command / Name"
+            } else {
+                "Name"
+            },
+            "GPU memory",
+            "Type",
+        ])
+        .style(
             Style::default()
                 .fg(Color::Cyan)
                 .add_modifier(Modifier::BOLD),
@@ -287,6 +427,130 @@ fn draw_processes(frame: &mut Frame, area: Rect, view: &DeviceView, visible_rows
     )
     .block(block);
     frame.render_widget(table, area);
+}
+
+/// Each column represents equal elapsed time. Any explicit missing sample leaves a
+/// gap in its bucket; populated buckets retain peaks so brief load is not erased.
+pub fn time_buckets(
+    history: &std::collections::VecDeque<HistoryPoint>,
+    now_ms: u64,
+    window_ms: u64,
+    sample_interval_ms: u64,
+    width: usize,
+    metric: fn(&HistoryPoint) -> Option<u64>,
+) -> Vec<Option<u64>> {
+    if width == 0 || window_ms == 0 {
+        return vec![];
+    }
+    let start = now_ms.saturating_sub(window_ms);
+    let mut buckets = vec![None; width];
+    let mut missing = vec![false; width];
+    for point in history {
+        if point.sampled_at_ms < start || point.sampled_at_ms > now_ms {
+            continue;
+        }
+        let first = (((point.sampled_at_ms - start) as u128 * width as u128 / window_ms as u128)
+            as usize)
+            .min(width - 1);
+        // A sampled value covers its acquisition interval, without extending over
+        // missing acquisitions. This avoids fictitious gaps on wider terminals.
+        let covered_until = point
+            .sampled_at_ms
+            .saturating_add(sample_interval_ms.saturating_sub(1))
+            .min(now_ms);
+        let last = (((covered_until - start) as u128 * width as u128 / window_ms as u128) as usize)
+            .min(width - 1);
+        for bucket in first..=last {
+            match metric(point) {
+                Some(value) if !missing[bucket] => {
+                    buckets[bucket] = Some(buckets[bucket].unwrap_or(0).max(value))
+                }
+                None => {
+                    missing[bucket] = true;
+                    buckets[bucket] = None;
+                }
+                _ => {}
+            }
+        }
+    }
+    buckets
+}
+
+fn draw_overview(frame: &mut Frame, area: Rect, app: &App) {
+    let rows = app
+        .ordered_views()
+        .map(|view| {
+            if let Some(gpu) = &view.gpu {
+                Row::new(vec![
+                    gpu.device.index.to_string(),
+                    safe_text(&gpu.device.name),
+                    value(gpu.metrics.gpu_utilization, "%"),
+                    gpu.memory.as_ref().map_or_else(
+                        || "N/A".into(),
+                        |memory| format!("{:.1}/{:.1}", memory.used_gib(), memory.total_gib()),
+                    ),
+                    gpu.memory.as_ref().map_or_else(
+                        || "N/A".into(),
+                        |memory| format!("{:.1}", memory.free as f64 / 1024_f64.powi(3)),
+                    ),
+                    value(gpu.metrics.temperature, "°C"),
+                    gpu.processes.len().to_string(),
+                    if app.is_stale(view) {
+                        "STALE".into()
+                    } else if gpu.issues.is_empty() {
+                        "Live".into()
+                    } else {
+                        format!("{} issues", gpu.issues.len())
+                    },
+                ])
+            } else {
+                Row::new(vec![
+                    view.index.to_string(),
+                    "Unavailable".into(),
+                    "N/A".into(),
+                    "N/A".into(),
+                    "N/A".into(),
+                    "N/A".into(),
+                    "N/A".into(),
+                    "Failed".into(),
+                ])
+            }
+        })
+        .collect::<Vec<_>>();
+    let table = Table::new(
+        rows,
+        [
+            Constraint::Length(4),
+            Constraint::Min(12),
+            Constraint::Length(6),
+            Constraint::Length(13),
+            Constraint::Length(9),
+            Constraint::Length(7),
+            Constraint::Length(5),
+            Constraint::Length(9),
+        ],
+    )
+    .header(
+        Row::new([
+            "GPU",
+            "Name",
+            "Load",
+            "Used/Total GiB",
+            "Free GiB",
+            "Temp",
+            "Procs",
+            "Status",
+        ])
+        .style(Style::default().fg(Color::Cyan)),
+    )
+    .block(Block::bordered().title("All selected GPUs · ↑/↓ select · Enter details · t toggle"))
+    .row_highlight_style(Style::default().add_modifier(Modifier::REVERSED));
+    let mut selected = TableState::default().with_selected(if app.device_count() > 0 {
+        Some(app.selected_position())
+    } else {
+        None
+    });
+    frame.render_stateful_widget(table, area, &mut selected);
 }
 
 #[cfg(test)]
@@ -312,6 +576,9 @@ mod tests {
                     frame.area(),
                     "Load".into(),
                     &history,
+                    59,
+                    60,
+                    1,
                     |point| point.gpu,
                     Color::Green,
                 )
@@ -326,17 +593,17 @@ mod tests {
     fn issue7_absent_sample_is_a_gap_distinct_from_zero() {
         let history = VecDeque::from([
             HistoryPoint {
-                sampled_at_ms: 1,
+                sampled_at_ms: 0,
                 gpu: Some(0),
                 memory: None,
             },
             HistoryPoint {
-                sampled_at_ms: 2,
+                sampled_at_ms: 1,
                 gpu: None,
                 memory: None,
             },
             HistoryPoint {
-                sampled_at_ms: 3,
+                sampled_at_ms: 2,
                 gpu: Some(100),
                 memory: None,
             },
@@ -349,6 +616,9 @@ mod tests {
                     frame.area(),
                     "GPU".into(),
                     &history,
+                    3,
+                    3,
+                    1,
                     |point| point.gpu,
                     Color::Green,
                 )

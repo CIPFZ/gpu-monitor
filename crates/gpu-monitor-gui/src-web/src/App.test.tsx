@@ -4,6 +4,7 @@ import { invoke } from '@tauri-apps/api/core';
 import App from './App';
 import { gpu, lost, snapshot, TIME } from './test/fixtures';
 vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
+vi.mock('./monitor/useMonitorTools', () => ({ useMonitorTools: () => ({ tools: null, busy: false, error: null, run: vi.fn() }) }));
 const mockedInvoke = vi.mocked(invoke);
 beforeEach(() => { vi.useFakeTimers(); vi.setSystemTime(TIME); mockedInvoke.mockReset(); });
 afterEach(() => vi.useRealTimers());
@@ -35,7 +36,7 @@ describe('multi-GPU views (#11)', () => {
     it('renders unavailable readings and process errors honestly (#2)', async () => {
         const card = gpu();
         card.metrics.temperature = null; card.memory = null; card.device.power_limit = null;
-        card.processes = [{ pid: 9, name: 'worker', gpu_memory: null, process_type: 'Compute' }];
+        card.processes = [{ pid: 9, name: 'worker', gpu_memory: null, process_type: 'Compute', user: null, uid: null, command: null, started_at_ms: null, elapsed_seconds: null }];
         card.issues = [{ metric: 'processes_graphics', error: { kind: 'permission_denied', message: 'Permission denied' } }];
         mockedInvoke.mockResolvedValue(snapshot(TIME, [card])); render(<App />); await flush();
         expect(screen.getAllByText('N/A').length).toBeGreaterThanOrEqual(3);

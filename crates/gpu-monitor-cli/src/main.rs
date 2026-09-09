@@ -1,43 +1,31 @@
-//! Terminal-based GPU monitoring with machine-readable failure information.
-
+//! Terminal monitoring, recording and replay over the shared background runtime.
 mod app;
+mod args;
+mod feed;
+mod output;
+mod selection;
 #[cfg(test)]
 mod tests;
 mod tui;
 mod ui;
 
-use clap::{Parser, Subcommand};
-use gpu_monitor_core::{MonitorService, MonitorSnapshot};
-
-#[derive(Parser, Debug)]
-#[command(
-    name = "gpu-monitor",
-    author,
-    version,
-    about = "Real-time NVIDIA GPU monitoring"
-)]
-struct Cli {
-    /// Print GPU info once and exit
-    #[arg(short, long)]
-    once: bool,
-    /// Continuous output (TUI, or JSON Lines with --json)
-    #[arg(short, long)]
-    watch: bool,
-    /// Output a snapshot as JSON, including device and metric errors
-    #[arg(short, long)]
-    json: bool,
-    /// Refresh interval in milliseconds (minimum 100)
-    #[arg(short, long, default_value = "1000", value_parser = clap::value_parser!(u64).range(app::MIN_INTERVAL_MS..))]
-    interval: u64,
-    #[command(subcommand)]
-    command: Option<Commands>,
-}
-
-#[derive(Subcommand, Debug)]
-enum Commands {
-    /// Show GPU processes only (retains GPU identity and errors in JSON)
-    Processes,
-}
+use args::{Cli, Commands};
+use clap::Parser;
+use feed::{Feed, LiveFeed, Playback};
+use gpu_monitor_core::MonitorSnapshot;
+use gpu_monitor_runtime::{load_recording, AlertConfig, MonitorRuntime};
+use output::{print_snapshot, selection_result};
+#[cfg(test)]
+use output::{process_snapshot_json, snapshot_result, truncate_str};
+use selection::Selection;
+use std::{
+    path::Path,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
+    time::{Duration, Instant},
+};
 
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
@@ -48,191 +36,256 @@ fn main() -> anyhow::Result<()> {
                 .add_directive(tracing::Level::WARN.into()),
         )
         .init();
-    let mut monitor = MonitorService::new();
-    if matches!(cli.command, Some(Commands::Processes)) {
-        let snapshot = monitor.sample();
-        print_snapshot(&snapshot, cli.json, true)?;
-        return snapshot_result(&snapshot);
+    let selection = Selection::from(&cli);
+    if let Some(Commands::Replay { path, speed }) = &cli.command {
+        return replay(path, *speed, &cli, &selection);
     }
-    if cli.once || (cli.json && !cli.watch) {
-        let snapshot = monitor.sample();
-        print_snapshot(&snapshot, cli.json, false)?;
-        snapshot_result(&snapshot)
-    } else if cli.json {
-        run_json_watch(&mut monitor, cli.interval)
-    } else {
-        let mut session = tui::init()?;
-        app::App::new(cli.interval).run(&mut session.terminal, &mut monitor)
+    let runtime = MonitorRuntime::new(Duration::from_millis(cli.interval));
+    runtime
+        .configure_alerts(AlertConfig {
+            enabled: cli.alerts,
+            ..AlertConfig::default()
+        })
+        .map_err(anyhow::Error::msg)?;
+    match &cli.command {
+        Some(Commands::Record { path, duration }) => {
+            record(&runtime, path, *duration, cli.include_command)
+        }
+        Some(Commands::Alerts {
+            temperature,
+            temperature_recovery,
+            memory,
+            memory_recovery,
+            duration_seconds,
+            cooldown_seconds,
+        }) => {
+            let config = AlertConfig {
+                enabled: true,
+                temperature_threshold: *temperature,
+                temperature_recovery: *temperature_recovery,
+                memory_threshold: *memory,
+                memory_recovery: *memory_recovery,
+                duration_ms: seconds_to_ms(*duration_seconds)?,
+                cooldown_ms: seconds_to_ms(*cooldown_seconds)?,
+            };
+            runtime
+                .configure_alerts(config)
+                .map_err(anyhow::Error::msg)?;
+            alerts(&runtime, cli.json, &selection)
+        }
+        Some(Commands::Diagnostics) => {
+            let original = wait_for_sample(&runtime)?;
+            let selected = selection.apply(&original);
+            if cli.json {
+                print_snapshot(&selected, true, false, selection.has_device_filter())?;
+            } else {
+                print!("{}", output::diagnostics_text(&selected));
+            }
+            selection_result(&original, &selected, &selection)
+        }
+        Some(Commands::Processes) if cli.watch => {
+            if cli.json {
+                stream(&runtime, &selection, true)
+            } else {
+                let mut terminal = tui::init()?;
+                app::App::new(cli.interval)
+                    .with_options(selection, cli.history_seconds * 1000)
+                    .run(&mut terminal.terminal, &mut LiveFeed::new(&runtime))
+            }
+        }
+        Some(Commands::Processes) => {
+            let original = wait_for_sample(&runtime)?;
+            let selected = selection.apply(&original);
+            print_snapshot(&selected, cli.json, true, selection.has_device_filter())?;
+            selection_result(&original, &selected, &selection)
+        }
+        _ if cli.once || (cli.json && !cli.watch) => {
+            let original = wait_for_sample(&runtime)?;
+            let selected = selection.apply(&original);
+            print_snapshot(&selected, cli.json, false, selection.has_device_filter())?;
+            selection_result(&original, &selected, &selection)
+        }
+        _ if cli.json => stream(&runtime, &selection, false),
+        _ => {
+            let mut terminal = tui::init()?;
+            let mut feed = LiveFeed::new(&runtime);
+            app::App::new(cli.interval)
+                .with_options(selection, cli.history_seconds * 1000)
+                .run(&mut terminal.terminal, &mut feed)
+        }
     }
 }
-
-#[derive(serde::Serialize)]
-struct ProcessSnapshot<'a> {
-    sampled_at_ms: u64,
-    gpus: Vec<ProcessGpu<'a>>,
-    failures: &'a [gpu_monitor_core::DeviceFailure],
-    error: &'a Option<gpu_monitor_core::SampleError>,
+fn seconds_to_ms(seconds: f64) -> anyhow::Result<u64> {
+    if !seconds.is_finite() || seconds < 0.0 || seconds > u64::MAX as f64 / 1000.0 {
+        anyhow::bail!("Duration is outside the supported range");
+    }
+    Ok((seconds * 1000.0) as u64)
 }
-
-#[derive(serde::Serialize)]
-struct ProcessGpu<'a> {
-    device: ProcessDevice<'a>,
-    sampled_at_ms: u64,
-    processes: Vec<ProcessOutput<'a>>,
-    issues: &'a [gpu_monitor_core::MetricIssue],
+fn interrupt_flag() -> anyhow::Result<Arc<AtomicBool>> {
+    let stopped = Arc::new(AtomicBool::new(false));
+    let handler = stopped.clone();
+    ctrlc::set_handler(move || handler.store(true, Ordering::Relaxed))?;
+    Ok(stopped)
 }
-
-#[derive(serde::Serialize)]
-struct ProcessDevice<'a> {
-    index: u32,
-    uuid: &'a str,
-    name: &'a str,
-}
-
-#[derive(serde::Serialize)]
-struct ProcessOutput<'a> {
-    #[serde(flatten)]
-    process: &'a gpu_monitor_core::GpuProcess,
-    gpu_memory_mib: Option<u64>,
-}
-
-/// Machine-readable process output uses the same snapshot envelope and preserves errors.
-fn process_snapshot_json(snapshot: &MonitorSnapshot) -> ProcessSnapshot<'_> {
-    ProcessSnapshot {
-        sampled_at_ms: snapshot.sampled_at_ms,
-        gpus: snapshot
-            .gpus
-            .iter()
-            .map(|gpu| ProcessGpu {
-                device: ProcessDevice {
-                    index: gpu.device.index,
-                    uuid: &gpu.device.uuid,
-                    name: &gpu.device.name,
-                },
-                sampled_at_ms: gpu.sampled_at_ms,
-                processes: gpu
-                    .processes
-                    .iter()
-                    .map(|process| ProcessOutput {
-                        process,
-                        gpu_memory_mib: process.gpu_memory_mib(),
-                    })
-                    .collect(),
-                issues: &gpu.issues,
-            })
-            .collect(),
-        failures: &snapshot.failures,
-        error: &snapshot.error,
+fn wait_for_sample(runtime: &MonitorRuntime) -> anyhow::Result<MonitorSnapshot> {
+    let until = Instant::now() + Duration::from_secs(30);
+    loop {
+        match runtime.latest() {
+            Ok(snapshot) => return Ok(snapshot),
+            Err(error) if Instant::now() >= until => {
+                anyhow::bail!("No completed sample within 30 seconds: {error}")
+            }
+            Err(_) => std::thread::sleep(Duration::from_millis(20)),
+        }
     }
 }
-
-fn print_snapshot(
-    snapshot: &MonitorSnapshot,
-    json: bool,
+fn stream(
+    runtime: &MonitorRuntime,
+    selection: &Selection,
     processes_only: bool,
 ) -> anyhow::Result<()> {
-    if json {
-        let output = if processes_only {
-            serde_json::to_value(process_snapshot_json(snapshot))?
-        } else {
-            serde_json::to_value(snapshot)?
-        };
-        println!("{}", serde_json::to_string_pretty(&output)?);
-        return Ok(());
+    let stopped = interrupt_flag()?;
+    let mut feed = LiveFeed::new(runtime);
+    while !stopped.load(Ordering::Relaxed) {
+        match feed.poll() {
+            Ok(snapshots) => {
+                for snapshot in snapshots {
+                    let selected = selection.apply(&snapshot);
+                    if processes_only {
+                        println!(
+                            "{}",
+                            serde_json::to_string(&output::process_snapshot_json(&selected))?
+                        );
+                    } else {
+                        println!("{}", serde_json::to_string(&selected)?);
+                    }
+                }
+            }
+            Err(_) => {} // The first completed snapshot includes initialization errors.
+        }
+        std::thread::sleep(Duration::from_millis(50));
     }
-    println!(
-        "GPU sample at {} ms since Unix epoch",
-        snapshot.sampled_at_ms
+    Ok(())
+}
+fn record(
+    runtime: &MonitorRuntime,
+    path: &Path,
+    duration: Option<u64>,
+    include_commands: bool,
+) -> anyhow::Result<()> {
+    let stopped = interrupt_flag()?;
+    runtime
+        .start_recording(path.to_path_buf(), include_commands)
+        .map_err(anyhow::Error::msg)?;
+    eprintln!(
+        "Recording all devices to {}. Ctrl-C finishes and flushes the file.",
+        path.display()
     );
-    if let Some(error) = &snapshot.error {
-        println!("Monitor unavailable: {}", error.message);
-    }
-    for failure in &snapshot.failures {
-        println!(
-            "GPU {} unavailable: {}",
-            failure.index, failure.error.message
-        );
-    }
-    if snapshot.gpus.is_empty() && snapshot.failures.is_empty() && snapshot.error.is_none() {
-        println!("No GPU devices detected.");
-    }
-    for gpu in &snapshot.gpus {
-        println!(
-            "GPU {}: {} ({})",
-            gpu.device.index, gpu.device.name, gpu.device.uuid
-        );
-        if !processes_only {
-            println!(
-                "  GPU load: {} | {}",
-                ui::value(gpu.metrics.gpu_utilization, "%"),
-                ui::memory_label(gpu)
-            );
-            println!(
-                "  Temperature: {} | Power: {}/{} | Fan: {}",
-                ui::value(gpu.metrics.temperature, "°C"),
-                ui::value(
-                    gpu.metrics.power_watts().map(|power| format!("{power:.1}")),
-                    " W"
-                ),
-                ui::value(gpu.device.power_limit, " W"),
-                ui::value(gpu.metrics.fan_speed, "%")
-            );
-            println!(
-                "  Clocks: graphics {}, SM {}, memory {}",
-                ui::value(gpu.metrics.clock_graphics, " MHz"),
-                ui::value(gpu.metrics.clock_sm, " MHz"),
-                ui::value(gpu.metrics.clock_memory, " MHz")
-            );
-            println!(
-                "  Memory I/O: {} | Encoder: {} | Decoder: {}",
-                ui::value(gpu.metrics.memory_utilization, "%"),
-                ui::value(gpu.metrics.encoder_utilization, "%"),
-                ui::value(gpu.metrics.decoder_utilization, "%")
-            );
+    let started = Instant::now();
+    while !stopped.load(Ordering::Relaxed)
+        && duration.is_none_or(|seconds| started.elapsed() < Duration::from_secs(seconds))
+    {
+        let status = runtime.recording_status();
+        if let Some(error) = status.error {
+            anyhow::bail!("Recording failed: {error}");
         }
-        for issue in &gpu.issues {
-            println!("  Unavailable {}: {}", issue.metric, issue.error.message);
-        }
-        println!("  {:>8}  {:<30} {:>12}  Type", "PID", "Name", "GPU memory");
-        for process in &gpu.processes {
-            println!(
-                "  {:>8}  {:<30} {:>12}  {}",
-                process.pid,
-                truncate_str(&process.name, 30),
-                ui::value(process.gpu_memory_mib(), " MiB"),
-                process.process_type.short_label()
-            );
-        }
+        std::thread::sleep(Duration::from_millis(50));
     }
-    Ok(())
-}
-
-fn snapshot_result(snapshot: &MonitorSnapshot) -> anyhow::Result<()> {
-    if let Some(error) = &snapshot.error {
-        anyhow::bail!("GPU sampling failed: {}", error.message);
-    }
-    if snapshot.gpus.is_empty() && !snapshot.failures.is_empty() {
-        anyhow::bail!("All GPU devices failed to report data");
-    }
-    Ok(())
-}
-
-fn run_json_watch(monitor: &mut MonitorService, interval: u64) -> anyhow::Result<()> {
+    runtime.stop_recording().map_err(anyhow::Error::msg)?;
+    let deadline = Instant::now() + Duration::from_secs(5);
     loop {
-        println!("{}", serde_json::to_string(&monitor.sample())?);
-        std::thread::sleep(std::time::Duration::from_millis(interval));
+        let status = runtime.recording_status();
+        if let Some(error) = &status.error {
+            anyhow::bail!("Recording failed: {error}");
+        }
+        if !status.finishing {
+            eprintln!(
+                "Recorded {} samples ({} bytes); {} samples dropped.",
+                status.samples_written, status.bytes_written, status.dropped_samples
+            );
+            if status.samples_written == 0 {
+                anyhow::bail!("No completed samples were recorded; retry with a longer duration or check the sampler");
+            }
+            if status.dropped_samples > 0 {
+                anyhow::bail!(
+                    "Recording is incomplete: {} samples dropped",
+                    status.dropped_samples
+                );
+            }
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            anyhow::bail!(
+                "Timed out while flushing recording; check {} before using it",
+                path.display()
+            );
+        }
+        std::thread::sleep(Duration::from_millis(20));
     }
 }
-
-fn truncate_str(text: &str, max_chars: usize) -> String {
-    if text.chars().count() <= max_chars {
-        text.into()
-    } else {
-        format!(
-            "{}…",
-            text.chars()
-                .take(max_chars.saturating_sub(1))
-                .collect::<String>()
-        )
+fn replay(path: &Path, speed: f64, cli: &Cli, selection: &Selection) -> anyhow::Result<()> {
+    let frames = load_recording(path).map_err(anyhow::Error::msg)?;
+    if cli.once {
+        let frame = frames
+            .first()
+            .ok_or_else(|| anyhow::anyhow!("Recording contains no snapshots"))?;
+        let selected = selection.apply(frame);
+        print_snapshot(&selected, cli.json, false, selection.has_device_filter())?;
+        return selection_result(frame, &selected, selection);
     }
+    let mut playback = Playback::new(frames, speed).map_err(anyhow::Error::msg)?;
+    if cli.json {
+        let stopped = interrupt_flag()?;
+        while !playback.is_finished() && !stopped.load(Ordering::Relaxed) {
+            for snapshot in playback.poll().map_err(anyhow::Error::msg)? {
+                println!("{}", serde_json::to_string(&selection.apply(&snapshot))?);
+            }
+            if !playback.is_finished() {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        }
+        Ok(())
+    } else {
+        let mut terminal = tui::init()?;
+        app::App::new(cli.interval)
+            .with_options(selection.clone(), cli.history_seconds * 1000)
+            .run(&mut terminal.terminal, &mut playback)
+    }
+}
+fn alerts(runtime: &MonitorRuntime, json: bool, selection: &Selection) -> anyhow::Result<()> {
+    let stopped = interrupt_flag()?;
+    if !json {
+        eprintln!(
+            "Alert monitoring active. Ctrl-C exits. Threshold configuration: {}",
+            serde_json::to_string(&runtime.alert_config())?
+        );
+    }
+    let mut last_id = 0;
+    while !stopped.load(Ordering::Relaxed) {
+        for event in runtime
+            .events()
+            .into_iter()
+            .filter(|event| event.id > last_id)
+            .collect::<Vec<_>>()
+        {
+            last_id = last_id.max(event.id);
+            if !selection.matches_event(&event) {
+                continue;
+            }
+            if json {
+                println!("{}", serde_json::to_string(&event)?);
+            } else {
+                println!(
+                    "{} {:?} {:?} {}: {}",
+                    event.at_ms,
+                    event.kind,
+                    event.state,
+                    output::safe_text(event.gpu_uuid.as_deref().unwrap_or("monitor")),
+                    output::safe_text(&event.message)
+                );
+            }
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    Ok(())
 }

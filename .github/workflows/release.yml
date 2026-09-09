@@ -20,7 +20,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Test CLI and core
-        run: cargo test --locked -p gpu-monitor-core -p gpu-monitor-cli
+        run: cargo test --locked -p gpu-monitor-core -p gpu-monitor-runtime -p gpu-monitor-cli
       - name: Build CLI
         run: cargo build --locked --release --bin gpu-monitor
       - uses: actions/upload-artifact@v4
@@ -52,7 +52,7 @@ jobs:
         working-directory: crates/gpu-monitor-gui/src-web
         run: npm test
       - name: Test backend
-        run: cargo test --locked -p gpu-monitor-gui
+        run: cargo test --locked -p gpu-monitor-core -p gpu-monitor-runtime -p gpu-monitor-gui
       - name: Build Tauri app (also builds frontend)
         working-directory: crates/gpu-monitor-gui
         run: npx --yes --package @tauri-apps/cli@2.11.3 tauri build --ci -- --locked

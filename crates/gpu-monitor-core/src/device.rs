@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 
 /// Static information about a GPU device
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
 pub struct DeviceInfo {
     /// Device index (0-based)
     pub index: u32,
@@ -25,12 +26,16 @@ pub struct DeviceInfo {
 
 /// GPU memory information
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
 pub struct MemoryInfo {
     /// Total memory in bytes
+    #[cfg_attr(feature = "typescript", ts(type = "number"))]
     pub total: u64,
     /// Used memory in bytes
+    #[cfg_attr(feature = "typescript", ts(type = "number"))]
     pub used: u64,
     /// Free memory in bytes
+    #[cfg_attr(feature = "typescript", ts(type = "number"))]
     pub free: u64,
 }
 

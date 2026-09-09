@@ -713,3 +713,30 @@ button:focus-visible, input:focus-visible, summary:focus-visible { outline: 2px 
   .process-toolbar { flex-wrap: wrap; gap: 12px; }
   .search-input { width: min(100%, 240px); }
 }
+
+/* Shared controls for live monitoring, recorded sessions and event inspection. */
+.app-container { overflow-y: auto; }
+.app-container > * { flex-shrink: 0; }
+.gpu-grid, .gpu-expanded-container { overflow: visible; flex: none; }
+.app-container > .table-container { flex: none; overflow-x: auto; }
+.toolbar { display: flex; flex-wrap: wrap; gap: 12px; align-items: end; }
+.toolbar label, .form-grid label, .tool-form > label:first-child { display: flex; flex-direction: column; gap: 5px; }
+input, select { padding: 7px 9px; border: 1px solid var(--border-light); border-radius: var(--radius-sm); background: var(--bg-card); color: var(--text-primary); max-width: 100%; }
+input[type=number] { width: 155px; }
+input[type=checkbox] { margin-right: 6px; accent-color: var(--accent-blue); }
+select:focus-visible { outline: 2px solid var(--accent-blue); outline-offset: 3px; }
+.tool-panel { padding: 12px 16px; border: 1px solid var(--border-light); border-radius: var(--radius-md); background: var(--bg-card); }
+.tool-panel > summary { cursor: pointer; font-weight: 600; }
+.tool-form { display: flex; flex-direction: column; align-items: start; gap: 12px; padding-top: 14px; }
+.tool-form > label:first-child { width: min(100%, 560px); }
+.form-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; width: 100%; }
+.notification-toggle { display: block; margin: 14px 0; }
+.event-list { list-style: none; max-height: 220px; overflow-y: auto; }
+.event-list li { padding: 6px 0; border-bottom: 1px solid var(--border-light); line-height: 1.5; overflow-wrap: anywhere; }
+.command-line { white-space: pre-wrap; overflow-wrap: anywhere; max-width: 440px; padding-top: 8px; }
+.process-table td { vertical-align: top; }
+.process-table details summary { cursor: pointer; color: var(--accent-blue); white-space: nowrap; }
+.gpu-comparison td { white-space: nowrap; }
+.status-replay { color: var(--accent-purple); border-color: currentColor; background: transparent; }
+.replay-toolbar { background: var(--bg-sidebar); padding: 12px; border-radius: var(--radius-md); }
+.process-toolbar { flex-wrap: wrap; gap: 10px; }
