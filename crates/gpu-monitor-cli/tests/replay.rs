@@ -2,7 +2,8 @@
 use serde_json::{json, Value};
 use std::{
     fs,
-    process::{Command, Output},
+    io::{BufRead, BufReader, Read},
+    process::{Command, Output, Stdio},
 };
 use tempfile::TempDir;
 
@@ -147,6 +148,47 @@ fn the_help_text_lists_every_command_a_user_can_run() {
         "a superseded flag is accepted but no longer advertised"
     );
 }
+#[test]
+fn a_reader_that_stops_early_ends_the_stream_instead_of_failing() {
+    // `gpu-monitor stream --json | head -1` is the obvious way to sample a
+    // stream. Closing the pipe is how the reader says it has enough, so it must
+    // not surface as a panic or an I/O error.
+    let frames = (0..200)
+        .map(|index| frame(1000 + index * 1000))
+        .collect::<Vec<_>>();
+    let (_directory, path) = recording(&frames);
+    let mut child = Command::new(env!("CARGO_BIN_EXE_gpu-monitor"))
+        .args(["replay", &path, "--json", "--speed", "100000"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+
+    // Read one record, then drop the read end while the child is still writing.
+    let mut first = String::new();
+    BufReader::new(child.stdout.take().unwrap())
+        .read_line(&mut first)
+        .unwrap();
+    assert!(serde_json::from_str::<Value>(first.trim()).is_ok());
+
+    let mut stderr = String::new();
+    child
+        .stderr
+        .take()
+        .unwrap()
+        .read_to_string(&mut stderr)
+        .unwrap();
+    let status = child.wait().unwrap();
+    assert!(
+        !stderr.contains("panicked") && !stderr.contains("Broken pipe"),
+        "a closed reader must not be reported as a fault: {stderr}"
+    );
+    assert!(
+        status.success(),
+        "ending early is a normal outcome, got {status:?}: {stderr}"
+    );
+}
+
 #[test]
 fn record_refuses_to_overwrite_existing_data() {
     let (_directory, path) = recording(&[frame(1000)]);

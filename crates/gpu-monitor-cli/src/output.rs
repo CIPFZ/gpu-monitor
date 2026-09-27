@@ -6,7 +6,10 @@
 
 use gpu_monitor_core::{GpuProcess, MonitorSnapshot};
 use gpu_monitor_runtime::{AlertEvent, AlertKind, AlertState};
-use std::fmt::Write;
+use std::{
+    fmt::Write as _,
+    io::{self, Write as _},
+};
 
 use crate::{
     args::OutputFormat,
@@ -353,23 +356,58 @@ fn relative_time(at_ms: u64, now_ms: u64) -> String {
     }
 }
 
+/// Whether the process reading our output is still listening.
+///
+/// A reader such as `head` closes the pipe once it has enough. That is how it
+/// says "stop", not a failure, so it ends the output normally instead of
+/// raising an I/O error the user would have to interpret.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Emit {
+    Wrote,
+    ReaderClosed,
+}
+
+impl Emit {
+    pub fn reader_closed(self) -> bool {
+        self == Emit::ReaderClosed
+    }
+}
+
+fn write_out(text: &str) -> anyhow::Result<Emit> {
+    let mut out = io::stdout().lock();
+    // Flush per record so a consumer reading a stream sees each sample as it is
+    // produced, rather than when a buffer happens to fill.
+    match out.write_all(text.as_bytes()).and_then(|()| out.flush()) {
+        Ok(()) => Ok(Emit::Wrote),
+        Err(error) if error.kind() == io::ErrorKind::BrokenPipe => Ok(Emit::ReaderClosed),
+        Err(error) => Err(error.into()),
+    }
+}
+
+pub fn emit_line(line: &str) -> anyhow::Result<Emit> {
+    write_out(&format!("{line}\n"))
+}
+
+pub fn emit_text(text: &str) -> anyhow::Result<Emit> {
+    write_out(text)
+}
+
 pub fn print_snapshot(
     snapshot: &MonitorSnapshot,
     format: OutputFormat,
     processes_only: bool,
     filtered: bool,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<Emit> {
     if format == OutputFormat::Json {
         let value = if processes_only {
             serde_json::to_value(process_snapshot_json(snapshot))?
         } else {
             serde_json::to_value(snapshot)?
         };
-        println!("{}", serde_json::to_string_pretty(&value)?);
+        emit_line(&serde_json::to_string_pretty(&value)?)
     } else {
-        print!("{}", snapshot_text(snapshot, processes_only, filtered));
+        emit_text(&snapshot_text(snapshot, processes_only, filtered))
     }
-    Ok(())
 }
 
 pub fn snapshot_result(snapshot: &MonitorSnapshot) -> anyhow::Result<()> {

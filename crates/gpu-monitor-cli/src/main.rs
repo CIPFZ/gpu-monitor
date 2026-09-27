@@ -101,9 +101,9 @@ fn report(
     let original = wait_for_sample(runtime)?;
     let selected = selection.apply(&original);
     let filtered = selection.has_device_filter();
-    match scope {
+    let emitted = match scope {
         Scope::Diagnostics if !cli.wants_json() => {
-            print!("{}", output::diagnostics_text(&selected));
+            output::emit_text(&output::diagnostics_text(&selected))?
         }
         Scope::Diagnostics => print_snapshot(&selected, OutputFormat::Json, false, filtered)?,
         scope => print_snapshot(
@@ -112,6 +112,10 @@ fn report(
             scope == Scope::Processes,
             filtered,
         )?,
+    };
+    if emitted.reader_closed() {
+        // Nobody is left to receive a selection diagnosis.
+        return Ok(());
     }
     selection_result(&original, &selected, selection)
 }
@@ -130,7 +134,9 @@ fn stream(
         if let Ok(snapshots) = feed.poll() {
             for snapshot in snapshots {
                 let selected = selection.apply(&snapshot);
-                print_frame(&selected, cli, selection, scope)?;
+                if print_frame(&selected, cli, selection, scope)?.reader_closed() {
+                    return Ok(());
+                }
             }
         }
         std::thread::sleep(Duration::from_millis(50));
@@ -143,26 +149,21 @@ fn print_frame(
     cli: &Cli,
     selection: &Selection,
     scope: Scope,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<output::Emit> {
     if cli.wants_json() {
         let line = if scope == Scope::Processes {
             serde_json::to_string(&output::process_snapshot_json(snapshot))?
         } else {
             serde_json::to_string(snapshot)?
         };
-        println!("{line}");
-    } else {
-        print!(
-            "{}",
-            output::snapshot_text(
-                snapshot,
-                scope == Scope::Processes,
-                selection.has_device_filter()
-            )
-        );
-        println!("{}", "─".repeat(40));
+        return output::emit_line(&line);
     }
-    Ok(())
+    let report = output::snapshot_text(
+        snapshot,
+        scope == Scope::Processes,
+        selection.has_device_filter(),
+    );
+    output::emit_text(&format!("{report}{}\n", "─".repeat(40)))
 }
 
 fn interrupt_flag() -> anyhow::Result<Arc<AtomicBool>> {
@@ -256,12 +257,16 @@ fn replay(
             .first()
             .ok_or_else(|| anyhow::anyhow!("Recording contains no snapshots"))?;
         let selected = selection.apply(frame);
-        print_snapshot(
+        if print_snapshot(
             &selected,
             cli.output_format(),
             false,
             selection.has_device_filter(),
-        )?;
+        )?
+        .reader_closed()
+        {
+            return Ok(());
+        }
         return selection_result(frame, &selected, selection);
     }
     let mut playback = Playback::new(frames, speed).map_err(anyhow::Error::msg)?;
@@ -269,7 +274,10 @@ fn replay(
         let stopped = interrupt_flag()?;
         while !playback.is_finished() && !stopped.load(Ordering::Relaxed) {
             for snapshot in playback.poll().map_err(anyhow::Error::msg)? {
-                println!("{}", serde_json::to_string(&selection.apply(&snapshot))?);
+                let line = serde_json::to_string(&selection.apply(&snapshot))?;
+                if output::emit_line(&line)?.reader_closed() {
+                    return Ok(());
+                }
             }
             if !playback.is_finished() {
                 std::thread::sleep(Duration::from_millis(10));
@@ -303,10 +311,13 @@ fn alerts(runtime: &MonitorRuntime, json: bool, selection: &Selection) -> anyhow
             if !selection.matches_event(&event) {
                 continue;
             }
-            if json {
-                println!("{}", serde_json::to_string(&event)?);
+            let line = if json {
+                serde_json::to_string(&event)?
             } else {
-                println!("{}", output::alert_report_line(&event));
+                output::alert_report_line(&event)
+            };
+            if output::emit_line(&line)?.reader_closed() {
+                return Ok(());
             }
         }
         std::thread::sleep(Duration::from_millis(100));
