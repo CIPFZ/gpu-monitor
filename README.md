@@ -7,9 +7,9 @@ GPU Monitor 是面向 Linux NVIDIA GPU 的资源监控工具，提供 Rust 终�
 ## 功能
 
 - GPU 负载、显存容量、温度、功耗、风扇、时钟、性能状态、降频原因及 PCIe 链路与吞吐。
-- 多卡详情、紧凑总览、设备筛选与排序；桌面端支持跨 GPU 进程视图。
-- 进程用户名 / UID、启动时间、运行时长、显存用量和可选完整参数。
-- 1 分钟、5 分钟、1 小时时间历史，保留采样缺口和设备错误。
+- 终端界面提供常驻设备侧栏与五个视图（仪表盘 / 进程 / 历史 / 诊断 / 告警），带阈值分级配色；桌面端支持跨 GPU 进程视图。
+- 进程用户名 / UID、启动时间、运行时长、显存用量和可选完整参数；终端内可按名称 / PID / 用户过滤并切换排序列。
+- 1 分钟、5 分钟、1 小时时间历史，可在运行中切换；负载、显存、温度、功耗四条曲线保留采样缺口和设备错误。
 - JSON Lines 录制与按采集时间回放；桌面端支持暂停、速度调整、定位和快照导出。
 - 温度、显存占用、设备和监控服务可用性告警；桌面通知需单独开启。
 
@@ -36,21 +36,26 @@ sudo apt-get install -y build-essential libwebkit2gtk-4.1-dev libssl-dev libgtk-
 
 ```sh
 cargo install --locked --path crates/gpu-monitor-cli
-gpu-monitor --watch
+gpu-monitor
 ```
+
+不带子命令即进入终端界面。其余行为各有明确的子命令：
 
 ```sh
-gpu-monitor --once
-gpu-monitor --json
-gpu-monitor --watch --json --interval 500
-gpu-monitor --gpu GPU-your-uuid --min-free-gib 8 --sort free-memory
-gpu-monitor --user alice processes
-gpu-monitor --json --include-command processes
-gpu-monitor --history-seconds 3600 --alerts
+gpu-monitor watch --interval 500              # 终端界面
+gpu-monitor snapshot                          # 单次文本报告
+gpu-monitor snapshot --format json            # 单次 JSON 对象
+gpu-monitor stream --format json              # 连续 JSON Lines
+gpu-monitor processes --user alice             # 单次进程报告
+gpu-monitor processes --stream --json --include-command
 gpu-monitor diagnostics
+gpu-monitor --gpu GPU-your-uuid --min-free-gib 8 --sort free-memory
+gpu-monitor --history-seconds 3600 --alerts
 ```
 
-TUI 使用 Left / Right 或 Tab 切换 GPU，Up / Down 滚动进程，`t` 切换总览，`d` 查看诊断，`a` 查看告警，`r` 请求重试，`q` 或 Ctrl-C 退出。刷新间隔最小 100 毫秒。
+`--format text|json`（`--json` 为简写）决定非交互输出格式。旧的 `--once` 与 `--watch` 仍被接受并映射到对应子命令，使用时会在标准错误提示替代写法。
+
+界面按 `←` / `→` 切换 GPU，`Tab` 或 `1`–`5` 切换视图，`↑` / `↓` 滚动，`/` 过滤进程，`s` 切换排序，`c` 显示完整命令行，`w` 切换曲线窗口，`b` 收放设备侧栏，`r` 请求重试，`?` 查看完整按键表，`q` 或 Ctrl-C 退出。刷新间隔最小 100 毫秒。终端低于 48 列 × 12 行时提示调整尺寸；窄于 92 列时侧栏自动收起以保证详情区宽度。
 
 ### 录制、回放与告警
 
@@ -58,7 +63,7 @@ TUI 使用 Left / Right 或 Tab 切换 GPU，Up / Down 滚动进程，`t` 切换
 gpu-monitor record session.jsonl --duration 60
 gpu-monitor replay session.jsonl --speed 2
 gpu-monitor replay session.jsonl --json --speed 1000
-gpu-monitor replay session.jsonl --once --json --gpu GPU-your-uuid
+gpu-monitor replay session.jsonl --first-frame --json --gpu GPU-your-uuid
 gpu-monitor alerts --temperature 85 --temperature-recovery 80 --memory 95 --memory-recovery 90 --duration-seconds 10 --cooldown-seconds 60 --json
 ```
 
@@ -83,7 +88,7 @@ gpu-monitor-gui
 
 ## 脚本接口
 
-单次 `--json` 输出一个快照对象，`--watch --json` 和 JSON 回放逐行输出快照：
+`snapshot --json` 输出一个快照对象，`stream --json` 和 JSON 回放逐行输出快照：
 
 ```json
 {

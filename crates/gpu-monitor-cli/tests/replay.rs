@@ -36,7 +36,15 @@ fn recording(frames: &[Value]) -> (TempDir, String) {
 #[test]
 fn executable_replays_private_arguments_only_when_explicitly_enabled() {
     let (_directory, path) = recording(&[frame(1000)]);
-    let output = run(&["replay", &path, "--once", "--json", "--user", "1000"]);
+    let output = run(&[
+        "replay",
+        &path,
+        "--first-frame",
+        "--format",
+        "json",
+        "--user",
+        "1000",
+    ]);
     assert!(
         output.status.success(),
         "{}",
@@ -47,20 +55,33 @@ fn executable_replays_private_arguments_only_when_explicitly_enabled() {
     assert_eq!(data["gpus"][0]["processes"][0]["elapsed_seconds"], 61);
     assert!(data["gpus"][0]["processes"][0]["command"].is_null());
     assert!(!String::from_utf8_lossy(&output.stdout).contains("secret"));
-    let explicit = run(&["replay", &path, "--once", "--json", "--include-command"]);
+    let explicit = run(&[
+        "replay",
+        &path,
+        "--first-frame",
+        "--json",
+        "--include-command",
+    ]);
     assert!(explicit.status.success());
     assert!(String::from_utf8_lossy(&explicit.stdout).contains("--token=secret"));
 }
 #[test]
 fn executable_replay_filters_have_useful_empty_selection_status() {
     let (_directory, path) = recording(&[frame(1000)]);
-    let output = run(&["replay", &path, "--once", "--json", "--gpu", "missing"]);
+    let output = run(&[
+        "replay",
+        &path,
+        "--first-frame",
+        "--json",
+        "--gpu",
+        "missing",
+    ]);
     assert!(!output.status.success());
     let data: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(data["schema_version"], 1);
     assert_eq!(data["gpus"], json!([]));
     assert!(String::from_utf8_lossy(&output.stderr).contains("No GPUs match"));
-    let output = run(&["replay", &path, "--once", "--json", "--user", "bob"]);
+    let output = run(&["replay", &path, "--first-frame", "--json", "--user", "bob"]);
     assert!(output.status.success());
     let data: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(data["gpus"][0]["processes"], json!([]));
@@ -68,7 +89,7 @@ fn executable_replay_filters_have_useful_empty_selection_status() {
 #[test]
 fn executable_replay_streams_every_frame_and_rejects_invalid_files() {
     let (_directory, path) = recording(&[frame(1000), frame(1200), frame(2500)]);
-    let output = run(&["replay", &path, "--json", "--speed", "1000"]);
+    let output = run(&["replay", &path, "--format", "json", "--speed", "1000"]);
     assert!(output.status.success());
     let frames = String::from_utf8(output.stdout)
         .unwrap()
@@ -88,6 +109,43 @@ fn executable_replay_streams_every_frame_and_rejects_invalid_files() {
     unsupported["schema_version"] = json!(999);
     fs::write(&path, format!("{unsupported}\n")).unwrap();
     assert!(!run(&["replay", &path, "--json"]).status.success());
+}
+#[test]
+fn the_superseded_flags_still_work_and_say_what_replaces_them() {
+    let (_directory, path) = recording(&[frame(1000)]);
+    let output = run(&["replay", &path, "--once", "--json"]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let data: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(data["sampled_at_ms"], 1000);
+    let warning = String::from_utf8_lossy(&output.stderr);
+    assert!(warning.contains("--once is deprecated"));
+    assert!(warning.contains("--first-frame"));
+}
+#[test]
+fn the_help_text_lists_every_command_a_user_can_run() {
+    let output = run(&["--help"]);
+    assert!(output.status.success());
+    let help = String::from_utf8_lossy(&output.stdout);
+    for command in [
+        "watch",
+        "snapshot",
+        "stream",
+        "processes",
+        "diagnostics",
+        "record",
+        "replay",
+        "alerts",
+    ] {
+        assert!(help.contains(command), "{command} is not documented");
+    }
+    assert!(
+        !help.contains("--once"),
+        "a superseded flag is accepted but no longer advertised"
+    );
 }
 #[test]
 fn record_refuses_to_overwrite_existing_data() {

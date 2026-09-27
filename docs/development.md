@@ -15,7 +15,7 @@
 以下命令从仓库根目录执行：
 
 ```sh
-cargo run --locked -p gpu-monitor-cli -- --watch --alerts
+cargo run --locked -p gpu-monitor-cli -- watch --alerts
 cargo run --locked -p gpu-monitor-cli -- --json
 cargo run --locked -p gpu-monitor-cli -- replay session.jsonl --json --speed 1000
 ```
@@ -68,7 +68,7 @@ python3 -m unittest discover -s tests -v
 | --- | --- |
 | core | 可注入采集后端、工厂和时钟；驱动错误、空值、元数据边界、PID 重用与退避 |
 | runtime | 受控线程和通道；缓存响应、时间历史、队列、录制限额、回放验证、告警状态 |
-| CLI | Ratatui TestBackend、状态测试和实际可执行文件；筛选、排序、时间桶、回放、命令隐私、退出语义 |
+| CLI | Ratatui TestBackend、状态测试和实际可执行文件；执行计划解析、按键与帮助的一致性、布局与阈值语义、独立滚动、过滤与排序、时间桶三态、回放、命令隐私、终端控制字符净化、退出语义 |
 | React | Vitest 与 Testing Library；轮询、历史、排序、跨卡进程、回放定位、告警和录制控件 |
 | 启动器 | 临时目录及替代子进程；安装中断、路径参数、组清理与无关进程存活 |
 

@@ -1,22 +1,32 @@
-//! Terminal monitoring, recording and replay over the shared background runtime.
+//! Terminal monitoring, reporting, recording and replay over the shared runtime.
+//!
+//! `main` dispatches on the `Plan` produced during parsing, so what runs is
+//! decided in one place instead of by a chain of flag combinations.
+
+mod action;
 mod app;
 mod args;
+mod device;
 mod feed;
+mod format;
+mod keymap;
+mod layout;
 mod output;
+mod render;
 mod selection;
+mod terminal;
 #[cfg(test)]
 mod tests;
-mod tui;
-mod ui;
+mod theme;
+mod view;
+mod widgets;
 
-use args::{Cli, Commands};
+use args::{Cli, OutputFormat, Plan, Scope};
 use clap::Parser;
 use feed::{Feed, LiveFeed, Playback};
 use gpu_monitor_core::MonitorSnapshot;
 use gpu_monitor_runtime::{load_recording, AlertConfig, MonitorRuntime};
 use output::{print_snapshot, selection_result};
-#[cfg(test)]
-use output::{process_snapshot_json, snapshot_result, truncate_str};
 use selection::Selection;
 use std::{
     path::Path,
@@ -36,10 +46,22 @@ fn main() -> anyhow::Result<()> {
                 .add_directive(tracing::Level::WARN.into()),
         )
         .init();
-    let selection = Selection::from(&cli);
-    if let Some(Commands::Replay { path, speed }) = &cli.command {
-        return replay(path, *speed, &cli, &selection);
+    for notice in cli.deprecations() {
+        eprintln!("warning: {notice}");
     }
+    let plan = cli.plan().map_err(anyhow::Error::msg)?;
+    let selection = Selection::from(&cli);
+
+    // Replaying a file must never require a driver, so no runtime is created.
+    if let Plan::Replay {
+        path,
+        speed,
+        first_frame_only,
+    } = &plan
+    {
+        return replay(path, *speed, *first_frame_only, &cli, &selection);
+    }
+
     let runtime = MonitorRuntime::new(Duration::from_millis(cli.interval));
     runtime
         .configure_alerts(AlertConfig {
@@ -47,86 +69,109 @@ fn main() -> anyhow::Result<()> {
             ..AlertConfig::default()
         })
         .map_err(anyhow::Error::msg)?;
-    match &cli.command {
-        Some(Commands::Record { path, duration }) => {
-            record(&runtime, path, *duration, cli.include_command)
-        }
-        Some(Commands::Alerts {
-            temperature,
-            temperature_recovery,
-            memory,
-            memory_recovery,
-            duration_seconds,
-            cooldown_seconds,
-        }) => {
-            let config = AlertConfig {
-                enabled: true,
-                temperature_threshold: *temperature,
-                temperature_recovery: *temperature_recovery,
-                memory_threshold: *memory,
-                memory_recovery: *memory_recovery,
-                duration_ms: seconds_to_ms(*duration_seconds)?,
-                cooldown_ms: seconds_to_ms(*cooldown_seconds)?,
-            };
+    match plan {
+        Plan::Watch => watch(&runtime, &cli, selection),
+        Plan::Snapshot(scope) => report(&runtime, &cli, &selection, scope),
+        Plan::Stream(scope) => stream(&runtime, &cli, &selection, scope),
+        Plan::Record { path, duration } => record(&runtime, &path, duration, cli.include_command),
+        Plan::Alerts(config) => {
             runtime
                 .configure_alerts(config)
                 .map_err(anyhow::Error::msg)?;
-            alerts(&runtime, cli.json, &selection)
+            alerts(&runtime, cli.wants_json(), &selection)
         }
-        Some(Commands::Diagnostics) => {
-            let original = wait_for_sample(&runtime)?;
-            let selected = selection.apply(&original);
-            if cli.json {
-                print_snapshot(&selected, true, false, selection.has_device_filter())?;
-            } else {
-                print!("{}", output::diagnostics_text(&selected));
-            }
-            selection_result(&original, &selected, &selection)
-        }
-        Some(Commands::Processes) if cli.watch => {
-            if cli.json {
-                stream(&runtime, &selection, true)
-            } else {
-                let mut terminal = tui::init()?;
-                app::App::new(cli.interval)
-                    .with_options(selection, cli.history_seconds * 1000)
-                    .run(&mut terminal.terminal, &mut LiveFeed::new(&runtime))
-            }
-        }
-        Some(Commands::Processes) => {
-            let original = wait_for_sample(&runtime)?;
-            let selected = selection.apply(&original);
-            print_snapshot(&selected, cli.json, true, selection.has_device_filter())?;
-            selection_result(&original, &selected, &selection)
-        }
-        _ if cli.once || (cli.json && !cli.watch) => {
-            let original = wait_for_sample(&runtime)?;
-            let selected = selection.apply(&original);
-            print_snapshot(&selected, cli.json, false, selection.has_device_filter())?;
-            selection_result(&original, &selected, &selection)
-        }
-        _ if cli.json => stream(&runtime, &selection, false),
-        _ => {
-            let mut terminal = tui::init()?;
-            let mut feed = LiveFeed::new(&runtime);
-            app::App::new(cli.interval)
-                .with_options(selection, cli.history_seconds * 1000)
-                .run(&mut terminal.terminal, &mut feed)
-        }
+        Plan::Replay { .. } => unreachable!("replay is handled without a runtime"),
     }
 }
-fn seconds_to_ms(seconds: f64) -> anyhow::Result<u64> {
-    if !seconds.is_finite() || seconds < 0.0 || seconds > u64::MAX as f64 / 1000.0 {
-        anyhow::bail!("Duration is outside the supported range");
-    }
-    Ok((seconds * 1000.0) as u64)
+
+fn watch(runtime: &MonitorRuntime, cli: &Cli, selection: Selection) -> anyhow::Result<()> {
+    let mut session = terminal::init()?;
+    let mut feed = LiveFeed::new(runtime);
+    app::App::new(cli.interval)
+        .with_options(selection, cli.history_seconds * 1000)
+        .run(&mut session.terminal, &mut feed)
 }
+
+fn report(
+    runtime: &MonitorRuntime,
+    cli: &Cli,
+    selection: &Selection,
+    scope: Scope,
+) -> anyhow::Result<()> {
+    let original = wait_for_sample(runtime)?;
+    let selected = selection.apply(&original);
+    let filtered = selection.has_device_filter();
+    match scope {
+        Scope::Diagnostics if !cli.wants_json() => {
+            print!("{}", output::diagnostics_text(&selected));
+        }
+        Scope::Diagnostics => print_snapshot(&selected, OutputFormat::Json, false, filtered)?,
+        scope => print_snapshot(
+            &selected,
+            cli.output_format(),
+            scope == Scope::Processes,
+            filtered,
+        )?,
+    }
+    selection_result(&original, &selected, selection)
+}
+
+fn stream(
+    runtime: &MonitorRuntime,
+    cli: &Cli,
+    selection: &Selection,
+    scope: Scope,
+) -> anyhow::Result<()> {
+    let stopped = interrupt_flag()?;
+    let mut feed = LiveFeed::new(runtime);
+    while !stopped.load(Ordering::Relaxed) {
+        // The first completed snapshot carries any initialization error, so an
+        // empty cache is simply "not ready yet".
+        if let Ok(snapshots) = feed.poll() {
+            for snapshot in snapshots {
+                let selected = selection.apply(&snapshot);
+                print_frame(&selected, cli, selection, scope)?;
+            }
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    Ok(())
+}
+
+fn print_frame(
+    snapshot: &MonitorSnapshot,
+    cli: &Cli,
+    selection: &Selection,
+    scope: Scope,
+) -> anyhow::Result<()> {
+    if cli.wants_json() {
+        let line = if scope == Scope::Processes {
+            serde_json::to_string(&output::process_snapshot_json(snapshot))?
+        } else {
+            serde_json::to_string(snapshot)?
+        };
+        println!("{line}");
+    } else {
+        print!(
+            "{}",
+            output::snapshot_text(
+                snapshot,
+                scope == Scope::Processes,
+                selection.has_device_filter()
+            )
+        );
+        println!("{}", "─".repeat(40));
+    }
+    Ok(())
+}
+
 fn interrupt_flag() -> anyhow::Result<Arc<AtomicBool>> {
     let stopped = Arc::new(AtomicBool::new(false));
     let handler = stopped.clone();
     ctrlc::set_handler(move || handler.store(true, Ordering::Relaxed))?;
     Ok(stopped)
 }
+
 fn wait_for_sample(runtime: &MonitorRuntime) -> anyhow::Result<MonitorSnapshot> {
     let until = Instant::now() + Duration::from_secs(30);
     loop {
@@ -139,34 +184,7 @@ fn wait_for_sample(runtime: &MonitorRuntime) -> anyhow::Result<MonitorSnapshot> 
         }
     }
 }
-fn stream(
-    runtime: &MonitorRuntime,
-    selection: &Selection,
-    processes_only: bool,
-) -> anyhow::Result<()> {
-    let stopped = interrupt_flag()?;
-    let mut feed = LiveFeed::new(runtime);
-    while !stopped.load(Ordering::Relaxed) {
-        match feed.poll() {
-            Ok(snapshots) => {
-                for snapshot in snapshots {
-                    let selected = selection.apply(&snapshot);
-                    if processes_only {
-                        println!(
-                            "{}",
-                            serde_json::to_string(&output::process_snapshot_json(&selected))?
-                        );
-                    } else {
-                        println!("{}", serde_json::to_string(&selected)?);
-                    }
-                }
-            }
-            Err(_) => {} // The first completed snapshot includes initialization errors.
-        }
-        std::thread::sleep(Duration::from_millis(50));
-    }
-    Ok(())
-}
+
 fn record(
     runtime: &MonitorRuntime,
     path: &Path,
@@ -223,18 +241,31 @@ fn record(
         std::thread::sleep(Duration::from_millis(20));
     }
 }
-fn replay(path: &Path, speed: f64, cli: &Cli, selection: &Selection) -> anyhow::Result<()> {
+
+fn replay(
+    path: &Path,
+    speed: f64,
+    first_frame_only: bool,
+    cli: &Cli,
+    selection: &Selection,
+) -> anyhow::Result<()> {
+    // The whole file is validated before anything is reported.
     let frames = load_recording(path).map_err(anyhow::Error::msg)?;
-    if cli.once {
+    if first_frame_only {
         let frame = frames
             .first()
             .ok_or_else(|| anyhow::anyhow!("Recording contains no snapshots"))?;
         let selected = selection.apply(frame);
-        print_snapshot(&selected, cli.json, false, selection.has_device_filter())?;
+        print_snapshot(
+            &selected,
+            cli.output_format(),
+            false,
+            selection.has_device_filter(),
+        )?;
         return selection_result(frame, &selected, selection);
     }
     let mut playback = Playback::new(frames, speed).map_err(anyhow::Error::msg)?;
-    if cli.json {
+    if cli.wants_json() {
         let stopped = interrupt_flag()?;
         while !playback.is_finished() && !stopped.load(Ordering::Relaxed) {
             for snapshot in playback.poll().map_err(anyhow::Error::msg)? {
@@ -244,14 +275,14 @@ fn replay(path: &Path, speed: f64, cli: &Cli, selection: &Selection) -> anyhow::
                 std::thread::sleep(Duration::from_millis(10));
             }
         }
-        Ok(())
-    } else {
-        let mut terminal = tui::init()?;
-        app::App::new(cli.interval)
-            .with_options(selection.clone(), cli.history_seconds * 1000)
-            .run(&mut terminal.terminal, &mut playback)
+        return Ok(());
     }
+    let mut session = terminal::init()?;
+    app::App::new(cli.interval)
+        .with_options(selection.clone(), cli.history_seconds * 1000)
+        .run(&mut session.terminal, &mut playback)
 }
+
 fn alerts(runtime: &MonitorRuntime, json: bool, selection: &Selection) -> anyhow::Result<()> {
     let stopped = interrupt_flag()?;
     if !json {
@@ -275,14 +306,7 @@ fn alerts(runtime: &MonitorRuntime, json: bool, selection: &Selection) -> anyhow
             if json {
                 println!("{}", serde_json::to_string(&event)?);
             } else {
-                println!(
-                    "{} {:?} {:?} {}: {}",
-                    event.at_ms,
-                    event.kind,
-                    event.state,
-                    output::safe_text(event.gpu_uuid.as_deref().unwrap_or("monitor")),
-                    output::safe_text(&event.message)
-                );
+                println!("{}", output::alert_report_line(&event));
             }
         }
         std::thread::sleep(Duration::from_millis(100));

@@ -1,6 +1,18 @@
-use crate::{selection::Selection, ui};
+//! Non-interactive reports and the shared JSON projections.
+//!
+//! The JSON contract is unchanged: consumers still receive the snapshot exactly
+//! as the core defines it. Only the human-readable layout was reorganised, into
+//! labelled groups with aligned columns instead of one long line per concern.
+
 use gpu_monitor_core::{GpuProcess, MonitorSnapshot};
+use gpu_monitor_runtime::{AlertEvent, AlertKind, AlertState};
 use std::fmt::Write;
+
+use crate::{
+    args::OutputFormat,
+    format::{self, UNAVAILABLE},
+    selection::Selection,
+};
 
 #[derive(serde::Serialize)]
 pub struct ProcessSnapshot<'a> {
@@ -10,6 +22,7 @@ pub struct ProcessSnapshot<'a> {
     failures: &'a [gpu_monitor_core::DeviceFailure],
     error: &'a Option<gpu_monitor_core::SampleError>,
 }
+
 #[derive(serde::Serialize)]
 struct ProcessGpu<'a> {
     device: ProcessDevice<'a>,
@@ -17,18 +30,21 @@ struct ProcessGpu<'a> {
     processes: Vec<ProcessOutput<'a>>,
     issues: &'a [gpu_monitor_core::MetricIssue],
 }
+
 #[derive(serde::Serialize)]
 struct ProcessDevice<'a> {
     index: u32,
     uuid: &'a str,
     name: &'a str,
 }
+
 #[derive(serde::Serialize)]
 struct ProcessOutput<'a> {
     #[serde(flatten)]
     process: &'a GpuProcess,
     gpu_memory_mib: Option<u64>,
 }
+
 pub fn process_snapshot_json(snapshot: &MonitorSnapshot) -> ProcessSnapshot<'_> {
     ProcessSnapshot {
         schema_version: snapshot.schema_version,
@@ -58,20 +74,25 @@ pub fn process_snapshot_json(snapshot: &MonitorSnapshot) -> ProcessSnapshot<'_> 
         error: &snapshot.error,
     }
 }
+
 pub fn snapshot_text(snapshot: &MonitorSnapshot, processes_only: bool, filtered: bool) -> String {
     let mut text = format!(
-        "GPU sample at {} ms since Unix epoch (schema {})\n",
-        snapshot.sampled_at_ms, snapshot.schema_version
+        "GPU sample · schema {} · {} ms since the Unix epoch\n",
+        snapshot.schema_version, snapshot.sampled_at_ms
     );
     if let Some(error) = &snapshot.error {
-        let _ = writeln!(text, "Monitor unavailable: {}", safe_text(&error.message));
+        let _ = writeln!(
+            text,
+            "Monitor unavailable: {}",
+            format::safe_text(&error.message)
+        );
     }
     for failure in &snapshot.failures {
         let _ = writeln!(
             text,
             "GPU {} unavailable: {}",
             failure.index,
-            safe_text(&failure.error.message)
+            format::safe_text(&failure.error.message)
         );
     }
     if snapshot.gpus.is_empty() && snapshot.failures.is_empty() && snapshot.error.is_none() {
@@ -82,184 +103,263 @@ pub fn snapshot_text(snapshot: &MonitorSnapshot, processes_only: bool, filtered:
         });
     }
     for gpu in &snapshot.gpus {
+        let metrics = &gpu.metrics;
+        let memory = gpu.memory.as_ref();
         let _ = writeln!(
             text,
-            "GPU {}: {} ({})",
+            "\nGPU {}  {}",
             gpu.device.index,
-            safe_text(&gpu.device.name),
-            gpu.device.uuid
+            format::safe_text(&gpu.device.name)
+        );
+        let _ = writeln!(
+            text,
+            "  {} · {} · driver {} · CUDA {}",
+            format::safe_text(&gpu.device.uuid),
+            format::safe_text(&gpu.device.pci_bus_id),
+            format::safe_text(&gpu.device.driver_version),
+            gpu.device
+                .cuda_version
+                .as_deref()
+                .map(format::safe_text)
+                .unwrap_or_else(|| UNAVAILABLE.to_owned())
         );
         if !processes_only {
+            let usage = format::memory_ratio(memory)
+                .map(|percent| format!(" ({percent:.0}%)"))
+                .unwrap_or_default();
             let _ = writeln!(
                 text,
-                "  GPU load: {} | {}",
-                ui::value(gpu.metrics.gpu_utilization, "%"),
-                ui::memory_label(gpu)
+                "  Load    {}   Memory {}{}   Temp {}   Fan {}",
+                format::value(metrics.gpu_utilization, "%"),
+                format::memory_capacity(memory),
+                usage,
+                format::value(metrics.temperature, "°C"),
+                format::value(metrics.fan_speed, "%")
             );
             let _ = writeln!(
                 text,
-                "  Temperature: {} | Power: {}/{} | Fan: {}",
-                ui::value(gpu.metrics.temperature, "°C"),
-                ui::value(
-                    gpu.metrics.power_watts().map(|power| format!("{power:.1}")),
-                    " W"
-                ),
-                ui::value(gpu.device.power_limit, " W"),
-                ui::value(gpu.metrics.fan_speed, "%")
+                "  Power   {}   State {}   Throttle {}",
+                format::power_capacity(metrics.power_watts(), gpu.device.power_limit),
+                metrics
+                    .performance_state
+                    .as_deref()
+                    .map(format::safe_text)
+                    .unwrap_or_else(|| UNAVAILABLE.to_owned()),
+                format::throttle(metrics.throttle_reasons.as_ref())
             );
             let _ = writeln!(
                 text,
-                "  Clocks: graphics {}, SM {}, memory {}",
-                ui::value(gpu.metrics.clock_graphics, " MHz"),
-                ui::value(gpu.metrics.clock_sm, " MHz"),
-                ui::value(gpu.metrics.clock_memory, " MHz")
+                "  Clocks  graphics {} · SM {} · memory {}",
+                format::value(metrics.clock_graphics, " MHz"),
+                format::value(metrics.clock_sm, " MHz"),
+                format::value(metrics.clock_memory, " MHz")
             );
             let _ = writeln!(
                 text,
-                "  Memory I/O: {} | Encoder: {} | Decoder: {}",
-                ui::value(gpu.metrics.memory_utilization, "%"),
-                ui::value(gpu.metrics.encoder_utilization, "%"),
-                ui::value(gpu.metrics.decoder_utilization, "%")
+                "  Video   memory I/O {} · encoder {} · decoder {}",
+                format::value(metrics.memory_utilization, "%"),
+                format::value(metrics.encoder_utilization, "%"),
+                format::value(metrics.decoder_utilization, "%")
             );
             let _ = writeln!(
                 text,
-                "  State: {} | Throttle: {} | PCIe: Gen {} ×{} | RX: {} | TX: {}",
-                gpu.metrics.performance_state.as_deref().unwrap_or("N/A"),
-                gpu.metrics
-                    .throttle_reasons
-                    .as_ref()
-                    .map(|reasons| if reasons.is_empty() {
-                        "none".into()
-                    } else {
-                        reasons.join(", ")
-                    })
-                    .unwrap_or_else(|| "N/A".into()),
-                ui::value(gpu.metrics.pcie_generation, ""),
-                ui::value(gpu.metrics.pcie_width, ""),
-                ui::value(gpu.metrics.pcie_rx_kb_per_second, " KB/s"),
-                ui::value(gpu.metrics.pcie_tx_kb_per_second, " KB/s")
+                "  Link    PCIe {} · RX {} · TX {}",
+                format::pcie_link(metrics.pcie_generation, metrics.pcie_width),
+                format::value(metrics.pcie_rx_kb_per_second, " KB/s"),
+                format::value(metrics.pcie_tx_kb_per_second, " KB/s")
             );
         }
         for issue in &gpu.issues {
             let _ = writeln!(
                 text,
                 "  Unavailable {}: {}",
-                issue.metric,
-                safe_text(&issue.error.message)
+                format::safe_text(&issue.metric),
+                format::safe_text(&issue.error.message)
             );
         }
+        text.push_str(&process_table(gpu));
+    }
+    format::safe_lines(&text)
+}
+
+fn process_table(gpu: &gpu_monitor_core::GpuInfo) -> String {
+    let mut text = format!("  Processes ({})\n", gpu.processes.len());
+    if gpu.processes.is_empty() {
+        text.push_str(
+            if gpu
+                .issues
+                .iter()
+                .any(|issue| issue.metric.starts_with("processes"))
+            {
+                "    Process list unavailable or incomplete.\n"
+            } else {
+                "    No processes in this view.\n"
+            },
+        );
+        return text;
+    }
+    let _ = writeln!(
+        text,
+        "    {:>8}  {:<16} {:<12} {:>12}  {:<5} NAME",
+        "PID", "USER", "ELAPSED", "GPU MEMORY", "TYPE"
+    );
+    for process in &gpu.processes {
         let _ = writeln!(
             text,
-            "  {:>8}  {:<16} {:<12} {:<30} {:>12}  Type",
-            "PID", "User", "Elapsed", "Name", "GPU memory"
+            "    {:>8}  {:<16} {:<12} {:>12}  {:<5} {}",
+            process.pid,
+            format::truncate_str(&format::process_owner(process), 16),
+            format::elapsed(process.elapsed_seconds),
+            format::value(process.gpu_memory_mib(), " MiB"),
+            process.process_type.short_label(),
+            format::safe_text(&process.name)
         );
-        for process in &gpu.processes {
+        if let Some(command) = &process.command {
             let _ = writeln!(
                 text,
-                "  {:>8}  {:<16} {:<12} {:<30} {:>12}  {}",
-                process.pid,
-                truncate_str(&process_owner(process), 16),
-                elapsed(process.elapsed_seconds),
-                truncate_str(&safe_text(&process.name), 30),
-                ui::value(process.gpu_memory_mib(), " MiB"),
-                process.process_type.short_label()
-            );
-            if let Some(command) = &process.command {
-                let _ = writeln!(
-                    text,
-                    "    Command: {}",
-                    serde_json::to_string(command).unwrap_or_default()
-                );
-            }
-        }
-        if gpu.processes.is_empty() {
-            text.push_str(
-                if gpu
-                    .issues
-                    .iter()
-                    .any(|issue| issue.metric.starts_with("processes"))
-                {
-                    "  Process list unavailable or incomplete.\n"
-                } else {
-                    "  No processes in this view.\n"
-                },
+                "      command: {}",
+                serde_json::to_string(command).unwrap_or_default()
             );
         }
     }
-    safe_lines(&text)
+    text
 }
+
 pub fn diagnostics_text(snapshot: &MonitorSnapshot) -> String {
     let mut text = format!(
-        "Monitor diagnostics · schema {} · sample {} ms\n",
+        "Monitor diagnostics · schema {} · sample {} ms\n\
+         Backend: NVIDIA NVML on Linux. An unavailable field keeps its reason below.\n",
         snapshot.schema_version, snapshot.sampled_at_ms
     );
-    text.push_str("Backend: NVIDIA NVML on Linux; unavailable fields retain their reason below.\n");
     for gpu in &snapshot.gpus {
         let _ = writeln!(
             text,
-            "GPU {}: {}\n  UUID: {}\n  PCI: {}\n  Driver: {}\n  CUDA: {}\n  Last sample: {} ms",
+            "\nGPU {}  {}\n  UUID          {}\n  PCI           {}\n  Driver        {}\n  \
+             CUDA          {}\n  Last sample   {} ms",
             gpu.device.index,
-            safe_text(&gpu.device.name),
-            gpu.device.uuid,
-            gpu.device.pci_bus_id,
-            gpu.device.driver_version,
-            gpu.device.cuda_version.as_deref().unwrap_or("N/A"),
+            format::safe_text(&gpu.device.name),
+            format::safe_text(&gpu.device.uuid),
+            format::safe_text(&gpu.device.pci_bus_id),
+            format::safe_text(&gpu.device.driver_version),
+            gpu.device
+                .cuda_version
+                .as_deref()
+                .map(format::safe_text)
+                .unwrap_or_else(|| UNAVAILABLE.to_owned()),
             gpu.sampled_at_ms
         );
         let _ = writeln!(
             text,
-            "  Performance state: {}\n  Throttle reasons: {}\n  PCIe: Gen {} ×{}; RX {}; TX {}",
-            gpu.metrics.performance_state.as_deref().unwrap_or("N/A"),
+            "  Power limit   {} (max {})\n  State         {}\n  Throttle      {}\n  \
+             PCIe          {} · RX {} · TX {}",
+            format::value(gpu.device.power_limit, " W"),
+            format::value(gpu.device.power_limit_max, " W"),
             gpu.metrics
-                .throttle_reasons
-                .as_ref()
-                .map(|reasons| if reasons.is_empty() {
-                    "none".into()
-                } else {
-                    reasons.join(", ")
-                })
-                .unwrap_or_else(|| "N/A".into()),
-            ui::value(gpu.metrics.pcie_generation, ""),
-            ui::value(gpu.metrics.pcie_width, ""),
-            ui::value(gpu.metrics.pcie_rx_kb_per_second, " KB/s"),
-            ui::value(gpu.metrics.pcie_tx_kb_per_second, " KB/s")
+                .performance_state
+                .as_deref()
+                .map(format::safe_text)
+                .unwrap_or_else(|| UNAVAILABLE.to_owned()),
+            format::throttle(gpu.metrics.throttle_reasons.as_ref()),
+            format::pcie_link(gpu.metrics.pcie_generation, gpu.metrics.pcie_width),
+            format::value(gpu.metrics.pcie_rx_kb_per_second, " KB/s"),
+            format::value(gpu.metrics.pcie_tx_kb_per_second, " KB/s")
         );
+        if gpu.issues.is_empty() {
+            text.push_str("  Every requested metric was available.\n");
+        }
         for issue in &gpu.issues {
             let _ = writeln!(
                 text,
-                "  {}: {:?}: {}",
-                issue.metric,
+                "  Unavailable   {} · {:?} · {}",
+                format::safe_text(&issue.metric),
                 issue.error.kind,
-                safe_text(&issue.error.message)
+                format::safe_text(&issue.error.message)
             );
         }
     }
     if let Some(error) = &snapshot.error {
         let _ = writeln!(
             text,
-            "Global error: {:?}: {}",
+            "\nMonitor error · {:?} · {}",
             error.kind,
-            safe_text(&error.message)
+            format::safe_text(&error.message)
         );
     }
     for failure in &snapshot.failures {
         let _ = writeln!(
             text,
-            "GPU {} error: {:?}: {}",
+            "GPU {} error · {:?} · {}",
             failure.index,
             failure.error.kind,
-            safe_text(&failure.error.message)
+            format::safe_text(&failure.error.message)
         );
     }
-    safe_lines(&text)
+    format::safe_lines(&text)
 }
+
+fn alert_kind_label(kind: AlertKind) -> &'static str {
+    match kind {
+        AlertKind::Temperature => "temperature",
+        AlertKind::Memory => "memory",
+        AlertKind::DeviceUnavailable => "device-unavailable",
+        AlertKind::MonitorUnavailable => "monitor-unavailable",
+    }
+}
+
+fn alert_state_label(state: AlertState) -> &'static str {
+    match state {
+        AlertState::Firing => "firing",
+        AlertState::Recovered => "recovered",
+    }
+}
+
+fn alert_scope(event: &AlertEvent) -> String {
+    format::safe_text(event.gpu_uuid.as_deref().unwrap_or("monitor"))
+}
+
+/// Absolute time, for logs and scripts that consume the text form.
+pub fn alert_report_line(event: &AlertEvent) -> String {
+    format!(
+        "{} {:<9} {:<19} {:<40} {}",
+        event.at_ms,
+        alert_state_label(event.state),
+        alert_kind_label(event.kind),
+        format::truncate_str(&alert_scope(event), 40),
+        format::safe_text(&event.message)
+    )
+}
+
+/// Relative time, which is what a watching operator actually needs.
+pub fn alert_panel_line(event: &AlertEvent, now_ms: u64) -> String {
+    format!(
+        "{:>10}  {:<9} {:<19} {}",
+        relative_time(event.at_ms, now_ms),
+        alert_state_label(event.state),
+        alert_kind_label(event.kind),
+        format::safe_text(&event.message)
+    )
+}
+
+fn relative_time(at_ms: u64, now_ms: u64) -> String {
+    let Some(elapsed) = now_ms.checked_sub(at_ms) else {
+        return "just now".into();
+    };
+    let seconds = elapsed / 1000;
+    match seconds {
+        0 => "just now".into(),
+        seconds if seconds < 60 => format!("{seconds}s ago"),
+        seconds if seconds < 3_600 => format!("{}m ago", seconds / 60),
+        seconds => format!("{}h ago", seconds / 3_600),
+    }
+}
+
 pub fn print_snapshot(
     snapshot: &MonitorSnapshot,
-    json: bool,
+    format: OutputFormat,
     processes_only: bool,
     filtered: bool,
 ) -> anyhow::Result<()> {
-    if json {
+    if format == OutputFormat::Json {
         let value = if processes_only {
             serde_json::to_value(process_snapshot_json(snapshot))?
         } else {
@@ -271,15 +371,17 @@ pub fn print_snapshot(
     }
     Ok(())
 }
+
 pub fn snapshot_result(snapshot: &MonitorSnapshot) -> anyhow::Result<()> {
     if let Some(error) = &snapshot.error {
-        anyhow::bail!("GPU sampling failed: {}", safe_text(&error.message));
+        anyhow::bail!("GPU sampling failed: {}", format::safe_text(&error.message));
     }
     if snapshot.gpus.is_empty() && !snapshot.failures.is_empty() {
         anyhow::bail!("All selected GPU devices failed to report data");
     }
     Ok(())
 }
+
 pub fn selection_result(
     original: &MonitorSnapshot,
     selected: &MonitorSnapshot,
@@ -293,62 +395,4 @@ pub fn selection_result(
         anyhow::bail!("No GPUs match the requested filters");
     }
     Ok(())
-}
-pub fn safe_lines(text: &str) -> String {
-    text.chars()
-        .map(|character| {
-            if character.is_control() && character != '\n' {
-                ' '
-            } else {
-                character
-            }
-        })
-        .collect()
-}
-pub fn safe_text(text: &str) -> String {
-    text.chars()
-        .map(|character| {
-            if character.is_control() {
-                ' '
-            } else {
-                character
-            }
-        })
-        .collect()
-}
-pub fn process_owner(process: &GpuProcess) -> String {
-    process
-        .user
-        .as_ref()
-        .map(|name| safe_text(name))
-        .or_else(|| process.uid.map(|uid| uid.to_string()))
-        .unwrap_or_else(|| "N/A".into())
-}
-pub fn elapsed(seconds: Option<u64>) -> String {
-    seconds.map_or_else(
-        || "N/A".into(),
-        |seconds| {
-            let days = seconds / 86400;
-            let hours = seconds / 3600 % 24;
-            let minutes = seconds / 60 % 60;
-            let seconds = seconds % 60;
-            if days > 0 {
-                format!("{days}d {hours:02}:{minutes:02}:{seconds:02}")
-            } else {
-                format!("{hours:02}:{minutes:02}:{seconds:02}")
-            }
-        },
-    )
-}
-pub fn truncate_str(text: &str, max_chars: usize) -> String {
-    if text.chars().count() <= max_chars {
-        text.into()
-    } else {
-        format!(
-            "{}…",
-            text.chars()
-                .take(max_chars.saturating_sub(1))
-                .collect::<String>()
-        )
-    }
 }

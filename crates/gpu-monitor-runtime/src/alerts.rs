@@ -6,7 +6,7 @@ const MAX_EVENTS: usize = 500;
 const MAX_DEVICES: usize = 1024;
 
 #[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AlertConfig {
     pub enabled: bool,
